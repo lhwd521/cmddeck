@@ -54,7 +54,7 @@ class CodexBridge extends EventEmitter {
     }
 
     if (reasoningEffort) {
-      args.push('-c', `model_reasoning_effort="${reasoningEffort}"`);
+      args.push('-c', `model_reasoning_effort=${reasoningEffort}`);
     }
 
     applyPermissionMode(args, permissionMode);
@@ -84,7 +84,9 @@ class CodexBridge extends EventEmitter {
       }
 
       for (const dir of dirs) {
-        args.push('--add-dir', dir);
+        if (!providerSessionId) {
+          args.push('--add-dir', dir);
+        }
       }
 
       if (refs.length > 0) {
@@ -343,12 +345,14 @@ function applyPermissionMode(args, permissionMode) {
   }
 
   if (permissionMode === 'plan') {
-    args.push('--sandbox', 'read-only');
+    args.push('-c', 'sandbox_mode=read-only');
+    args.push('-c', 'approval_policy=never');
     return;
   }
 
   if (permissionMode === 'acceptEdits' || permissionMode === 'default' || !permissionMode) {
-    args.push('--sandbox', 'workspace-write');
+    args.push('-c', 'sandbox_mode=workspace-write');
+    args.push('-c', 'approval_policy=never');
   }
 }
 
