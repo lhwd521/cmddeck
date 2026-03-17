@@ -7,6 +7,15 @@ const CONTEXT_LIMITS = {
   codex: 256000,
 };
 
+function formatErrorText(message) {
+  const trimmed = String(message || '').trim();
+  if (!trimmed) {
+    return 'Error: Unknown error';
+  }
+
+  return /^error:/i.test(trimmed) ? trimmed : `Error: ${trimmed}`;
+}
+
 function upsertToolCall(toolCalls, nextToolCall) {
   if (!nextToolCall) {
     return;
@@ -196,6 +205,33 @@ export function useAgent() {
           if (!data.finalElapsed) {
             data.finalElapsed = Date.now() - data.startTime;
           }
+          {
+            const exitCode = typeof event.exitCode === 'number' ? event.exitCode : null;
+            const stderrText = String(data.stderrText || '').trim();
+            if (exitCode !== null && exitCode !== 0 && !String(data.text || '').trim() && stderrText) {
+              if (isViewing) {
+                setIsStreaming(false);
+                setTurnTimer({
+                  startTime: data.startTime,
+                  elapsed: data.finalElapsed,
+                  tokens: data.tokens,
+                });
+              }
+              if (entry.resolve) {
+                entry.resolve({
+                  text: formatErrorText(stderrText),
+                  toolCalls: [...data.toolCalls],
+                  providerSessionId: data.providerSessionId,
+                  error: stderrText,
+                });
+                entry.resolve = null;
+              }
+              if (entry.timeoutId) {
+                clearTimeout(entry.timeoutId);
+              }
+              break;
+            }
+          }
           if (isViewing) {
             setIsStreaming(false);
             setTurnTimer({
@@ -220,28 +256,35 @@ export function useAgent() {
           if (!data.finalElapsed) {
             data.finalElapsed = Date.now() - data.startTime;
           }
-          if (isViewing) {
-            setIsStreaming(false);
-            setTurnTimer({
-              startTime: data.startTime,
-              elapsed: data.finalElapsed,
-              tokens: data.tokens,
-            });
+          {
+            const errorMessage = event.message || 'Unknown error';
+            const formattedError = formatErrorText(errorMessage);
+            if (isViewing) {
+              setIsStreaming(false);
+              setTurnTimer({
+                startTime: data.startTime,
+                elapsed: data.finalElapsed,
+                tokens: data.tokens,
+              });
+            }
+            if (entry.resolve) {
+              entry.resolve({
+                text: data.text || formattedError,
+                toolCalls: [...data.toolCalls],
+                providerSessionId: data.providerSessionId,
+                error: errorMessage,
+              });
+              entry.resolve = null;
+            }
+            if (entry.timeoutId) {
+              clearTimeout(entry.timeoutId);
+            }
+            break;
           }
-          if (entry.resolve) {
-            entry.resolve({
-              text: data.text || `Error: ${event.message || 'Unknown error'}`,
-              toolCalls: [...data.toolCalls],
-              providerSessionId: data.providerSessionId,
-              error: event.message,
-            });
-            entry.resolve = null;
-          }
-          if (entry.timeoutId) {
-            clearTimeout(entry.timeoutId);
-          }
-          break;
         case 'stderr':
+          data.stderrText = data.stderrText
+            ? `${data.stderrText}\n${event.text}`
+            : (event.text || '');
           console.warn(`[${event.provider} stderr]`, event.text);
           break;
         default:
@@ -277,6 +320,7 @@ export function useAgent() {
       thinkingText: '',
       progressInfo: null,
       usage: null,
+      stderrText: '',
       startTime: Date.now(),
       finalElapsed: null,
       tokens: null,

@@ -2,6 +2,15 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 
 let _reqCounter = 0;
 
+function formatErrorText(message) {
+  const trimmed = String(message || '').trim();
+  if (!trimmed) {
+    return 'Error: Unknown error';
+  }
+
+  return /^error:/i.test(trimmed) ? trimmed : `Error: ${trimmed}`;
+}
+
 export function useClaude() {
   const [isStreaming, setIsStreaming] = useState(false);
   const [streamingText, setStreamingText] = useState('');
@@ -177,6 +186,31 @@ export function useClaude() {
 
         case 'process_end':
           if (!data.finalElapsed) data.finalElapsed = Date.now() - data.startTime;
+          {
+            const exitCode = typeof event.exitCode === 'number' ? event.exitCode : null;
+            const stderrText = String(data.stderrText || '').trim();
+            if (exitCode !== null && exitCode !== 0 && !String(data.text || '').trim() && stderrText) {
+              if (isViewing) {
+                setIsStreaming(false);
+                setTurnTimer({
+                  startTime: data.startTime,
+                  elapsed: data.finalElapsed,
+                  tokens: data.tokens,
+                });
+              }
+              if (entry.resolve) {
+                entry.resolve({
+                  text: formatErrorText(stderrText),
+                  toolCalls: [...data.toolCalls],
+                  ccSessionId: data.ccSessionId,
+                  error: stderrText,
+                });
+                entry.resolve = null;
+              }
+              if (entry.timeoutId) clearTimeout(entry.timeoutId);
+              break;
+            }
+          }
           if (isViewing) {
             setIsStreaming(false);
             setTurnTimer({
@@ -198,27 +232,34 @@ export function useClaude() {
 
         case 'error':
           if (!data.finalElapsed) data.finalElapsed = Date.now() - data.startTime;
-          if (isViewing) {
-            setIsStreaming(false);
-            setTurnTimer({
-              startTime: data.startTime,
-              elapsed: data.finalElapsed,
-              tokens: data.tokens,
-            });
+          {
+            const errorMessage = event.message || 'Unknown error';
+            const formattedError = formatErrorText(errorMessage);
+            if (isViewing) {
+              setIsStreaming(false);
+              setTurnTimer({
+                startTime: data.startTime,
+                elapsed: data.finalElapsed,
+                tokens: data.tokens,
+              });
+            }
+            if (entry.resolve) {
+              entry.resolve({
+                text: data.text || formattedError,
+                toolCalls: [...data.toolCalls],
+                ccSessionId: data.ccSessionId,
+                error: errorMessage,
+              });
+              entry.resolve = null;
+            }
+            if (entry.timeoutId) clearTimeout(entry.timeoutId);
           }
-          if (entry.resolve) {
-            entry.resolve({
-              text: data.text || `Error: ${event.message || 'Unknown error'}`,
-              toolCalls: [...data.toolCalls],
-              ccSessionId: data.ccSessionId,
-              error: event.message,
-            });
-            entry.resolve = null;
-          }
-          if (entry.timeoutId) clearTimeout(entry.timeoutId);
           break;
 
         case 'stderr':
+          data.stderrText = data.stderrText
+            ? `${data.stderrText}\n${event.text}`
+            : (event.text || '');
           console.warn('[claude stderr]', event.text);
           break;
       }
@@ -242,7 +283,18 @@ export function useClaude() {
       // Uncomment for debugging:
       // console.log('[useClaude] sendMessage, sid:', sessionId, 'requestId:', requestId);
 
-      const turnData = { text: '', toolCalls: [], ccSessionId: null, thinkingText: '', progressInfo: null, usage: null, startTime: Date.now(), finalElapsed: null, tokens: null };
+      const turnData = {
+        text: '',
+        toolCalls: [],
+        ccSessionId: null,
+        thinkingText: '',
+        progressInfo: null,
+        usage: null,
+        stderrText: '',
+        startTime: Date.now(),
+        finalElapsed: null,
+        tokens: null,
+      };
 
       // Clean up previous entry for this session if exists
       const prev = sessionsRef.current.get(sessionId);
