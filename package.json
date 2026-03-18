@@ -36,12 +36,14 @@
     "productName": "CmdDeck",
     "files": [
       "dist/**/*",
-      "electron/**/*"
+      "electron/**/*",
+      "assets/**/*"
     ],
     "directories": {
       "output": "release"
     },
     "win": {
+      "icon": "assets/icon.ico",
       "target": "portable",
       "signAndEditExecutable": false
     }

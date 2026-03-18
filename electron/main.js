@@ -16,6 +16,7 @@ const bridges = {
 const externalCliProcesses = new Map();
 const EXTERNAL_CLI_POLL_MS = 2000;
 let mainWindow;
+const appIconPath = path.join(__dirname, '../assets/icon.png');
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -25,6 +26,7 @@ function createWindow() {
     minHeight: 600,
     frame: false,
     backgroundColor: '#1A1A1A',
+    icon: fs.existsSync(appIconPath) ? appIconPath : undefined,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
