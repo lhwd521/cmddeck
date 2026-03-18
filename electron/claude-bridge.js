@@ -22,10 +22,10 @@ class ClaudeBridge extends EventEmitter {
 
     if (permissionMode === 'yolo') {
       args.push('--dangerously-skip-permissions');
-    } else if (permissionMode === 'plan') {
-      args.push('--permission-mode', 'plan');
-    } else if (permissionMode === 'acceptEdits') {
-      args.push('--permission-mode', 'acceptEdits');
+    } else if (permissionMode && permissionMode !== 'default') {
+      // All other modes map directly to --permission-mode:
+      // plan | acceptEdits | bypassPermissions | dontAsk | auto
+      args.push('--permission-mode', permissionMode);
     }
 
     let fullMessage = message;

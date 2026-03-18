@@ -23,9 +23,14 @@ import { useI18n } from '../i18n';
 function getClaudeModels(tx) {
   return [
     { id: '', label: tx('Default (CLI config)', '默认（CLI 配置）'), desc: tx('Use the Claude CLI default model', '使用 Claude CLI 默认模型') },
-    { id: 'sonnet', label: 'Sonnet', desc: tx('Claude Sonnet (latest) - balanced speed & quality', 'Claude Sonnet（最新版）- 速度与质量均衡') },
-    { id: 'opus', label: 'Opus', desc: tx('Claude Opus (latest) - highest reasoning quality', 'Claude Opus（最新版）- 推理质量最高') },
-    { id: 'haiku', label: 'Haiku', desc: tx('Claude Haiku (latest) - fastest response', 'Claude Haiku（最新版）- 响应最快') },
+    // Aliases — always resolve to the latest in that family
+    { id: 'sonnet', label: 'Sonnet', desc: 'claude-sonnet-4-6 · ' + tx('Balanced speed & quality', '速度与质量均衡') },
+    { id: 'opus', label: 'Opus', desc: 'claude-opus-4-6 · ' + tx('Most capable, complex reasoning', '能力最强，适合复杂推理') },
+    { id: 'haiku', label: 'Haiku', desc: 'claude-haiku-4-5 · ' + tx('Fast, lightweight tasks', '快速轻量任务') },
+    // Full model IDs
+    { id: 'claude-opus-4-6', label: 'Opus 4.6', desc: tx('Most capable — complex analysis & reasoning', '能力最强 — 复杂分析与推理') },
+    { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6', desc: tx('Best balance of capability and cost', '能力与成本最佳均衡') },
+    { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5', desc: tx('High-volume, simple tasks — fastest & cheapest', '高频简单任务 — 最快最便宜') },
   ];
 }
 
@@ -54,10 +59,13 @@ function getCodexEfforts(tx) {
 
 function getClaudeModes(tx) {
   return [
-    { id: 'default', label: tx('Default', '默认'), desc: tx('Ask before executing sensitive actions', '执行敏感操作前先询问'), color: 'text-gray-400' },
-    { id: 'plan', label: tx('Plan', '规划'), desc: tx('Plan only, do not edit files', '只做规划，不修改文件'), color: 'text-blue-400' },
-    { id: 'acceptEdits', label: tx('Accept Edits', '接受编辑'), desc: tx('Auto-accept file edits', '自动接受文件修改'), color: 'text-yellow-400' },
-    { id: 'yolo', label: 'YOLO', desc: tx('Skip permission checks', '跳过权限检查'), color: 'text-red-400' },
+    { id: 'default',            label: tx('Default', '默认'),                 desc: tx('Ask permission before executing sensitive actions', '执行敏感操作前先询问'),                       color: 'text-gray-400'   },
+    { id: 'plan',               label: tx('Plan', '规划'),                    desc: tx('Plan only — no file edits, no shell commands', '只规划 — 不修改文件，不执行命令'),                 color: 'text-blue-400'   },
+    { id: 'auto',               label: 'Auto',                                desc: tx('Smart auto-approve — low-risk actions proceed without prompts', '智能自动批准 — 低风险操作无需询问'), color: 'text-teal-400'   },
+    { id: 'acceptEdits',        label: tx('Accept Edits', '接受编辑'),        desc: tx('Auto-accept file edits, ask for other actions', '自动接受文件修改，其他操作仍需确认'),             color: 'text-yellow-400' },
+    { id: 'dontAsk',            label: tx("Don't Ask", '免打扰'),             desc: tx('Auto-approve most actions, minimal interruptions', '自动批准大多数操作，最少打扰'),                color: 'text-orange-400' },
+    { id: 'bypassPermissions',  label: tx('Bypass Permissions', '绕过权限'),  desc: tx('Bypass all permission checks — use in trusted environments', '绕过所有权限检查 — 仅在受信环境使用'),  color: 'text-red-400'    },
+    { id: 'yolo',               label: 'YOLO',                                desc: tx('--dangerously-skip-permissions flag — no restrictions at all', '--dangerously-skip-permissions — 完全无限制'), color: 'text-red-500' },
   ];
 }
 
