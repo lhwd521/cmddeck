@@ -66,10 +66,13 @@ export function generateId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
 
-export function createSession(cwd = '', provider = 'claude') {
+export function createSession(cwd = '', provider = 'claude', config = {}) {
   return {
     id: generateId(),
     provider,
+    model: typeof config.model === 'string' ? config.model : '',
+    reasoningEffort: typeof config.reasoningEffort === 'string' ? config.reasoningEffort : '',
+    permissionMode: typeof config.permissionMode === 'string' ? config.permissionMode : 'default',
     providerSessionId: null,
     providerSessionCwd: cwd || '',
     syncWithCli: false,
@@ -97,6 +100,9 @@ function normalizeSession(session) {
   return {
     ...session,
     provider: session.provider || 'claude',
+    model: typeof session.model === 'string' ? session.model : '',
+    reasoningEffort: typeof session.reasoningEffort === 'string' ? session.reasoningEffort : '',
+    permissionMode: typeof session.permissionMode === 'string' ? session.permissionMode : 'default',
     providerSessionId,
     providerSessionCwd: session.providerSessionCwd || session.cwd || '',
     messages: providerSessionId ? [] : (Array.isArray(session.messages) ? session.messages : []),
@@ -118,6 +124,9 @@ function serializeSession(session) {
   return {
     id: session.id,
     provider: session.provider || 'claude',
+    model: typeof session.model === 'string' ? session.model : '',
+    reasoningEffort: typeof session.reasoningEffort === 'string' ? session.reasoningEffort : '',
+    permissionMode: typeof session.permissionMode === 'string' ? session.permissionMode : 'default',
     providerSessionId: session.providerSessionId || session.ccSessionId || null,
     providerSessionCwd: session.providerSessionCwd || session.cwd || '',
     hasUnread: Boolean(session.hasUnread),

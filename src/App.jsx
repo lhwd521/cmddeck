@@ -17,7 +17,7 @@ const PROVIDER_LABELS = {
 };
 
 const CLI_SYNC_INTERVAL_MS = 4000;
-const AUTO_RUN_IDLE_MS = 5000;
+const AUTO_RUN_IDLE_MS = 3000;
 const DEFAULT_AUTO_RUN_PROMPT = 'Review the current goal and plan, then execute the next step.';
 
 export default function App() {
@@ -40,7 +40,16 @@ export default function App() {
 
   const [sessions, setSessions] = useState(() => {
     const saved = loadSessions();
-    return saved.length > 0 ? saved : [createSession(settings.cwd, settings.provider || 'claude')];
+    if (saved.length > 0) {
+      return saved;
+    }
+
+    const initialProvider = settings.provider || 'claude';
+    return [createSession(settings.cwd, initialProvider, {
+      model: initialProvider === 'claude' ? (settings.model || '') : (settings.codexModel || ''),
+      reasoningEffort: initialProvider === 'codex' ? (settings.codexReasoningEffort || '') : '',
+      permissionMode: normalizePermissionModeForProvider(initialProvider, settings.permissionMode || 'default'),
+    })];
   });
   const [activeSessionId, setActiveSessionId] = useState(sessions[0]?.id);
   const [showSettings, setShowSettings] = useState(false);
@@ -54,8 +63,14 @@ export default function App() {
   const [isActiveSessionLoading, setIsActiveSessionLoading] = useState(false);
   const activeSessionIdRef = useRef(activeSessionId);
   const sessionsRef = useRef(sessions);
-  const autoRunTimeoutRef = useRef(null);
-  const autoRunPendingSessionIdRef = useRef(null);
+  const autoRunTimeoutsRef = useRef(new Map());
+  const runningSessionIdsRef = useRef(new Set());
+  const autoRunConfigRef = useRef({
+    prompt: DEFAULT_AUTO_RUN_PROMPT,
+    defaultCount: 5,
+  });
+  const sendSessionMessageRef = useRef(null);
+  const scheduleAutoRunSessionsRef = useRef(() => {});
 
   const activeSession = sessions.find((session) => session.id === activeSessionId);
   const activeProvider = activeSession?.provider || settings.provider || 'claude';
@@ -74,12 +89,87 @@ export default function App() {
     sessionsRef.current = sessions;
   }, [sessions]);
 
-  const clearAutoRunTimer = useCallback(() => {
-    if (autoRunTimeoutRef.current) {
-      window.clearTimeout(autoRunTimeoutRef.current);
-      autoRunTimeoutRef.current = null;
+  useEffect(() => {
+    autoRunConfigRef.current = {
+      prompt: autoRunPrompt,
+      defaultCount: defaultAutoRunCount,
+    };
+  }, [autoRunPrompt, defaultAutoRunCount]);
+
+  const getSessionModel = useCallback((session) => {
+    if (!session) {
+      return '';
+    }
+
+    return session.model || (session.provider === 'claude' ? (settings.model || '') : (settings.codexModel || ''));
+  }, [settings.codexModel, settings.model]);
+
+  const getSessionReasoningEffort = useCallback((session) => {
+    if (!session || session.provider !== 'codex') {
+      return '';
+    }
+
+    return session.reasoningEffort || settings.codexReasoningEffort || '';
+  }, [settings.codexReasoningEffort]);
+
+  const getSessionPermissionMode = useCallback((session) => {
+    const provider = session?.provider || 'claude';
+    return normalizePermissionModeForProvider(provider, session?.permissionMode || settings.permissionMode || 'default');
+  }, [settings.permissionMode]);
+
+  const createConfiguredSession = useCallback((cwd, provider = 'claude', overrides = {}) => {
+    const normalizedProvider = provider === 'codex' ? 'codex' : 'claude';
+    const providerActiveSession = activeSession?.provider === normalizedProvider ? activeSession : null;
+    const fallbackModel = providerActiveSession
+      ? getSessionModel(providerActiveSession)
+      : (normalizedProvider === 'claude' ? (settings.model || '') : (settings.codexModel || ''));
+    const fallbackReasoningEffort = providerActiveSession
+      ? getSessionReasoningEffort(providerActiveSession)
+      : (normalizedProvider === 'codex' ? (settings.codexReasoningEffort || '') : '');
+    const fallbackPermissionMode = providerActiveSession
+      ? getSessionPermissionMode(providerActiveSession)
+      : normalizePermissionModeForProvider(normalizedProvider, settings.permissionMode || 'default');
+
+    return createSession(cwd, normalizedProvider, {
+      model: overrides.model ?? fallbackModel,
+      reasoningEffort: normalizedProvider === 'codex'
+        ? (overrides.reasoningEffort ?? fallbackReasoningEffort)
+        : '',
+      permissionMode: normalizePermissionModeForProvider(
+        normalizedProvider,
+        overrides.permissionMode ?? fallbackPermissionMode
+      ),
+    });
+  }, [
+    activeSession,
+    getSessionModel,
+    getSessionPermissionMode,
+    getSessionReasoningEffort,
+    settings.codexModel,
+    settings.codexReasoningEffort,
+    settings.model,
+    settings.permissionMode,
+  ]);
+
+  const clearAutoRunTimer = useCallback((sessionId = null) => {
+    if (!sessionId) {
+      for (const timeoutId of autoRunTimeoutsRef.current.values()) {
+        window.clearTimeout(timeoutId);
+      }
+      autoRunTimeoutsRef.current.clear();
+      return;
+    }
+
+    const timeoutId = autoRunTimeoutsRef.current.get(sessionId);
+    if (timeoutId) {
+      window.clearTimeout(timeoutId);
+      autoRunTimeoutsRef.current.delete(sessionId);
     }
   }, []);
+
+  useEffect(() => () => {
+    clearAutoRunTimer();
+  }, [clearAutoRunTimer]);
 
   const syncSessionFromCli = useCallback(async (sessionToSync) => {
     if (!sessionToSync?.providerSessionId) {
@@ -283,11 +373,38 @@ export default function App() {
     };
   }, [activeProvider, activeSessionId]);
 
+  const updateSession = useCallback((sessionId, updates) => {
+    setSessions((prev) => prev.map((session) => (
+      session.id === sessionId
+        ? { ...session, ...updates, updatedAt: Date.now() }
+        : session
+    )));
+  }, []);
+
+  const updateActiveSessionConfig = useCallback((updates) => {
+    if (!activeSession) {
+      return;
+    }
+
+    const normalizedUpdates = { ...updates };
+    if (Object.prototype.hasOwnProperty.call(normalizedUpdates, 'permissionMode')) {
+      normalizedUpdates.permissionMode = normalizePermissionModeForProvider(
+        activeSession.provider,
+        normalizedUpdates.permissionMode
+      );
+    }
+    if (activeSession.provider !== 'codex' && Object.prototype.hasOwnProperty.call(normalizedUpdates, 'reasoningEffort')) {
+      normalizedUpdates.reasoningEffort = '';
+    }
+
+    updateSession(activeSession.id, normalizedUpdates);
+  }, [activeSession, updateSession]);
+
   const handleNewSession = useCallback((provider = settings.provider || 'claude') => {
-    const session = createSession(settings.cwd, provider);
+    const session = createConfiguredSession(settings.cwd, provider);
     setSessions((prev) => [session, ...prev]);
     setActiveSessionId(session.id);
-  }, [settings.cwd, settings.provider]);
+  }, [createConfiguredSession, settings.cwd, settings.provider]);
 
   useEffect(() => {
     const handler = (event) => {
@@ -301,26 +418,23 @@ export default function App() {
       }
       if (event.altKey && event.key === 'm') {
         event.preventDefault();
-        const modes = (activeSession?.provider || settings.provider || 'claude') === 'codex'
+        const provider = activeSession?.provider || settings.provider || 'claude';
+        const modes = provider === 'codex'
           ? ['default', 'plan', 'yolo']
           : ['default', 'plan', 'acceptEdits', 'yolo'];
-        const current = settings.permissionMode || 'default';
+        const current = getSessionPermissionMode(activeSession);
         const index = modes.indexOf(current);
-        updateSettings({ permissionMode: modes[(index + 1) % modes.length] });
+        if (activeSession) {
+          updateSession(activeSession.id, {
+            permissionMode: modes[(index + 1) % modes.length],
+          });
+        }
       }
     };
 
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [activeSession?.provider, handleNewSession, settings.permissionMode, settings.provider, updateSettings]);
-
-  const updateSession = useCallback((sessionId, updates) => {
-    setSessions((prev) => prev.map((session) => (
-      session.id === sessionId
-        ? { ...session, ...updates, updatedAt: Date.now() }
-        : session
-    )));
-  }, []);
+  }, [activeSession, getSessionPermissionMode, handleNewSession, settings.provider, updateSession]);
 
   const handleSelectSession = useCallback((sessionId) => {
     setActiveSessionId(sessionId);
@@ -332,11 +446,13 @@ export default function App() {
   }, []);
 
   const handleDeleteSession = useCallback((sessionId) => {
+    clearAutoRunTimer(sessionId);
+    runningSessionIdsRef.current.delete(sessionId);
     cleanupSession(sessionId);
     setSessions((prev) => {
       const filtered = prev.filter((session) => session.id !== sessionId);
       if (filtered.length === 0) {
-        filtered.push(createSession(settings.cwd, settings.provider || 'claude'));
+        filtered.push(createConfiguredSession(settings.cwd, settings.provider || 'claude'));
       }
       if (sessionId === activeSessionId) {
         const nextSessionId = filtered[0].id;
@@ -349,7 +465,7 @@ export default function App() {
       }
       return filtered;
     });
-  }, [activeSessionId, cleanupSession, settings.cwd, settings.provider]);
+  }, [activeSessionId, cleanupSession, clearAutoRunTimer, createConfiguredSession, settings.cwd, settings.provider]);
 
   const sendSessionMessage = useCallback(async (targetSession, message, files = [], options = {}) => {
     if (!targetSession) {
@@ -358,27 +474,30 @@ export default function App() {
 
     const sessionId = targetSession.id;
     const isAuto = options.isAuto === true;
+    const currentSession = sessionsRef.current.find((session) => session.id === sessionId) || targetSession;
+    const sessionModel = getSessionModel(currentSession);
+    const sessionReasoningEffort = getSessionReasoningEffort(currentSession);
+    const sessionPermissionMode = getSessionPermissionMode(currentSession);
+    const sessionContextUsage = sessionId === activeSessionIdRef.current ? contextUsage : null;
 
     if (message.trim() === '/status') {
       const userMessage = { role: 'user', content: '/status', localOnly: true };
       const statusLines = [
         `**${tx('App', '应用')}**: CmdDeck`,
-        `**${tx('Provider', '提供方')}**: ${PROVIDER_LABELS[targetSession.provider]}`,
-        `**${tx('Model', '模型')}**: ${targetSession.provider === 'claude'
-          ? (settings.model || tx('Default (CLI config)', '默认（CLI 配置）'))
-          : (settings.codexModel || tx('Default (CLI config)', '默认（CLI 配置）'))}`,
-        `**${tx('Reasoning Effort', '推理强度')}**: ${targetSession.provider === 'codex'
-          ? (settings.codexReasoningEffort || tx('Default (CLI config)', '默认（CLI 配置）'))
+        `**${tx('Provider', '提供方')}**: ${PROVIDER_LABELS[currentSession.provider]}`,
+        `**${tx('Model', '模型')}**: ${sessionModel || tx('Default (CLI config)', '默认（CLI 配置）')}`,
+        `**${tx('Reasoning Effort', '推理强度')}**: ${currentSession.provider === 'codex'
+          ? (sessionReasoningEffort || tx('Default (CLI config)', '默认（CLI 配置）'))
           : tx('N/A', '不适用')}`,
-        `**${tx('Mode', '模式')}**: ${settings.permissionMode || 'default'}`,
-        `**${tx('Working Directory', '工作目录')}**: ${targetSession.cwd || settings.cwd || tx('Not set', '未设置')}`,
+        `**${tx('Mode', '模式')}**: ${sessionPermissionMode}`,
+        `**${tx('Working Directory', '工作目录')}**: ${currentSession.cwd || settings.cwd || tx('Not set', '未设置')}`,
         `**${tx('Theme', '主题')}**: ${settings.theme || 'system'}`,
         `**${tx('Font Size', '字体大小')}**: ${settings.fontSize || 14}px`,
         `**${tx('Auto Run Default', '自动续跑默认次数')}**: ${defaultAutoRunCount}`,
         `**${tx('Auto Run Prompt', '自动续跑提示词')}**: ${autoRunPrompt}`,
         '',
-        `**${tx('Session Messages', '会话消息数')}**: ${getSessionMessageCount(targetSession)}`,
-        `**${tx('Context Usage', '上下文占用')}**: ${contextUsage ? `${contextUsage.percent}%` : tx('N/A', '不适用')}`,
+        `**${tx('Session Messages', '会话消息数')}**: ${getSessionMessageCount(currentSession)}`,
+        `**${tx('Context Usage', '上下文占用')}**: ${sessionContextUsage ? `${sessionContextUsage.percent}%` : tx('N/A', '不适用')}`,
       ];
 
       const statusMessage = {
@@ -395,13 +514,12 @@ export default function App() {
       return true;
     }
 
-    const currentSession = sessionsRef.current.find((session) => session.id === sessionId) || targetSession;
-    const providerReady = await ensureProviderReady(targetSession.provider);
+    const providerReady = await ensureProviderReady(currentSession.provider);
 
     if (!providerReady) {
       setProviderAvailability((prev) => ({
         ...prev,
-        [targetSession.provider]: {
+        [currentSession.provider]: {
           checked: true,
           installed: false,
         },
@@ -411,7 +529,7 @@ export default function App() {
 
     setProviderAvailability((prev) => ({
       ...prev,
-      [targetSession.provider]: {
+      [currentSession.provider]: {
         checked: true,
         installed: true,
       },
@@ -444,17 +562,15 @@ export default function App() {
     )));
 
     try {
-      const result = await sendMessage(sessionId, targetSession.provider, message, {
-        cwd: targetSession.cwd || settings.cwd || undefined,
+      const result = await sendMessage(sessionId, currentSession.provider, message, {
+        cwd: currentSession.cwd || settings.cwd || undefined,
         providerSessionId: currentSession?.providerSessionId || undefined,
         files: files.length > 0 ? files : undefined,
-        model: targetSession.provider === 'claude'
-          ? settings.model || undefined
-          : settings.codexModel || undefined,
-        reasoningEffort: targetSession.provider === 'codex'
-          ? settings.codexReasoningEffort || undefined
+        model: sessionModel || undefined,
+        reasoningEffort: currentSession.provider === 'codex'
+          ? sessionReasoningEffort || undefined
           : undefined,
-        permissionMode: settings.permissionMode || undefined,
+        permissionMode: sessionPermissionMode || undefined,
       });
 
       if (result?.error) {
@@ -498,7 +614,7 @@ export default function App() {
         return true;
       }
     } catch (err) {
-      const command = targetSession.provider === 'codex' ? 'codex' : 'claude';
+      const command = currentSession.provider === 'codex' ? 'codex' : 'claude';
       const errorMessage = {
         role: 'assistant',
         content: tx(
@@ -506,7 +622,7 @@ export default function App() {
           '错误：{message}\n\n请确认已经安装 {provider}，并且可以通过 `{command}` 命令访问。',
           {
             message: err.message,
-            provider: PROVIDER_LABELS[targetSession.provider],
+            provider: PROVIDER_LABELS[currentSession.provider],
             command,
           }
         ),
@@ -526,17 +642,20 @@ export default function App() {
     autoRunPrompt,
     contextUsage,
     defaultAutoRunCount,
+    getSessionModel,
+    getSessionPermissionMode,
+    getSessionReasoningEffort,
     sendMessage,
-    settings.codexModel,
-    settings.codexReasoningEffort,
     settings.cwd,
     settings.fontSize,
-    settings.model,
-    settings.permissionMode,
     settings.theme,
     syncSessionFromCli,
     tx,
   ]);
+
+  useEffect(() => {
+    sendSessionMessageRef.current = sendSessionMessage;
+  }, [sendSessionMessage]);
 
   const handleSend = useCallback((message, files = []) => {
     if (!activeSession) {
@@ -557,10 +676,20 @@ export default function App() {
       return;
     }
 
+    clearAutoRunTimer(activeSession.id);
+    runningSessionIdsRef.current.delete(activeSession.id);
     cleanupSession(activeSession.id);
 
     if (activeSession.providerSessionId) {
-      const replacement = createSession(activeSession.cwd || settings.cwd || '', activeSession.provider);
+      const replacement = createConfiguredSession(
+        activeSession.cwd || settings.cwd || '',
+        activeSession.provider,
+        {
+          model: getSessionModel(activeSession),
+          reasoningEffort: getSessionReasoningEffort(activeSession),
+          permissionMode: getSessionPermissionMode(activeSession),
+        }
+      );
       setSessions((prev) => prev.map((session) => (
         session.id === activeSession.id ? replacement : session
       )));
@@ -580,7 +709,17 @@ export default function App() {
       syncWithCli: false,
       externalCliPid: null,
     });
-  }, [activeSession, cleanupSession, settings.cwd, updateSession]);
+  }, [
+    activeSession,
+    cleanupSession,
+    clearAutoRunTimer,
+    createConfiguredSession,
+    getSessionModel,
+    getSessionPermissionMode,
+    getSessionReasoningEffort,
+    settings.cwd,
+    updateSession,
+  ]);
 
   const handleSelectDirectory = useCallback(async () => {
     if (!window.claude?.selectDirectory || !activeSession) {
@@ -608,7 +747,7 @@ export default function App() {
       ? normalizeHistoryMessages(result.messages || [])
       : [];
 
-    const session = createSession(historySession.project || settings.cwd, historySession.provider);
+    const session = createConfiguredSession(historySession.project || settings.cwd, historySession.provider);
     session.title = historySession.title || `Continued ${PROVIDER_LABELS[historySession.provider]}`;
     session.providerSessionId = historySession.sessionId;
     session.providerSessionCwd = historySession.project || settings.cwd || '';
@@ -623,7 +762,7 @@ export default function App() {
     if (window.agent?.setSessionId) {
       window.agent.setSessionId(historySession.provider, session.id, historySession.sessionId);
     }
-  }, [handleSelectSession, sessions, settings.cwd]);
+  }, [createConfiguredSession, handleSelectSession, sessions, settings.cwd]);
 
   const handleOpenInCli = useCallback(async () => {
     if (!activeSession || !window.agent?.openInCli) {
@@ -661,12 +800,30 @@ export default function App() {
     }
   }, [activeSession, settings.cwd, tx, updateSession]);
 
+  const shouldAutoRunSession = useCallback((session) => {
+    if (!session) {
+      return false;
+    }
+
+    const lastMessage = getLastAssistantMessage(session.messages || []);
+    return Boolean(
+      session.autoRunEnabled &&
+      getStoredAutoRunCount(session.autoRunRemaining) > 0 &&
+      !session.syncWithCli &&
+      !runningSessionIdsRef.current.has(session.id) &&
+      lastMessage &&
+      !lastMessage.localOnly &&
+      !isErrorAssistantMessage(lastMessage)
+    );
+  }, []);
+
   const handleToggleAutoRun = useCallback(() => {
     if (!activeSession) {
       return;
     }
 
-    clearAutoRunTimer();
+    clearAutoRunTimer(activeSession.id);
+    runningSessionIdsRef.current.delete(activeSession.id);
     const nextTotal = defaultAutoRunCount;
 
     setSessions((prev) => prev.map((session) => {
@@ -682,85 +839,94 @@ export default function App() {
         autoRunTotal: nextTotal,
       };
     }));
+
+    window.setTimeout(() => {
+      scheduleAutoRunSessionsRef.current();
+    }, 0);
   }, [activeSession, clearAutoRunTimer, defaultAutoRunCount]);
 
-  useEffect(() => {
-    clearAutoRunTimer();
-
-    if (!activeSession || autoRunPendingSessionIdRef.current === activeSession.id) {
-      return undefined;
+  const scheduleAutoRunSessions = useCallback((sessionList = sessionsRef.current) => {
+    const knownSessionIds = new Set(sessionList.map((session) => session.id));
+    for (const sessionId of autoRunTimeoutsRef.current.keys()) {
+      if (!knownSessionIds.has(sessionId)) {
+        clearAutoRunTimer(sessionId);
+      }
     }
 
-    const lastMessage = getLastAssistantMessage(activeSession.messages || []);
-    const shouldScheduleAutoRun = Boolean(
-      activeSession.autoRunEnabled &&
-      activeAutoRunRemaining > 0 &&
-      !activeSession.syncWithCli &&
-      !isStreaming &&
-      !isActiveSessionLoading &&
-      lastMessage &&
-      !lastMessage.localOnly &&
-      !isErrorAssistantMessage(lastMessage)
-    );
+    sessionList.forEach((session) => {
+      const shouldSchedule = shouldAutoRunSession(session);
+      const hasTimer = autoRunTimeoutsRef.current.has(session.id);
 
-    if (!shouldScheduleAutoRun) {
-      return undefined;
-    }
-
-    autoRunTimeoutRef.current = window.setTimeout(async () => {
-      autoRunTimeoutRef.current = null;
-
-      const latestSession = sessionsRef.current.find((session) => session.id === activeSession.id);
-      const latestLastMessage = getLastAssistantMessage(latestSession?.messages || []);
-
-      if (
-        !latestSession ||
-        activeSessionIdRef.current !== activeSession.id ||
-        autoRunPendingSessionIdRef.current === activeSession.id ||
-        !latestSession.autoRunEnabled ||
-        getStoredAutoRunCount(latestSession.autoRunRemaining) <= 0 ||
-        latestSession.syncWithCli ||
-        !latestLastMessage ||
-        latestLastMessage.localOnly ||
-        isErrorAssistantMessage(latestLastMessage)
-      ) {
+      if (!shouldSchedule) {
+        if (hasTimer) {
+          clearAutoRunTimer(session.id);
+        }
         return;
       }
 
-      autoRunPendingSessionIdRef.current = activeSession.id;
-      const nextRemaining = Math.max(0, getStoredAutoRunCount(latestSession.autoRunRemaining) - 1);
-
-      setSessions((prev) => prev.map((session) => (
-        session.id === activeSession.id
-          ? {
-              ...session,
-              autoRunEnabled: nextRemaining > 0,
-              autoRunRemaining: nextRemaining,
-              autoRunTotal: getStoredAutoRunCount(session.autoRunTotal) || defaultAutoRunCount,
-            }
-          : session
-      )));
-
-      try {
-        await sendSessionMessage(latestSession, autoRunPrompt, [], { isAuto: true });
-      } finally {
-        autoRunPendingSessionIdRef.current = null;
+      if (hasTimer) {
+        return;
       }
-    }, AUTO_RUN_IDLE_MS);
 
-    return () => {
-      clearAutoRunTimer();
-    };
-  }, [
-    activeAutoRunRemaining,
-    autoRunPrompt,
-    activeSession,
-    clearAutoRunTimer,
-    defaultAutoRunCount,
-    isActiveSessionLoading,
-    isStreaming,
-    sendSessionMessage,
-  ]);
+      const timeoutId = window.setTimeout(async () => {
+        clearAutoRunTimer(session.id);
+
+        const latestSession = sessionsRef.current.find((current) => current.id === session.id);
+        if (!latestSession || !shouldAutoRunSession(latestSession)) {
+          scheduleAutoRunSessionsRef.current();
+          return;
+        }
+
+        runningSessionIdsRef.current.add(session.id);
+        const nextRemaining = Math.max(0, getStoredAutoRunCount(latestSession.autoRunRemaining) - 1);
+
+        setSessions((prev) => prev.map((current) => (
+          current.id === session.id
+            ? {
+                ...current,
+                autoRunEnabled: nextRemaining > 0,
+                autoRunRemaining: nextRemaining,
+                autoRunTotal: getStoredAutoRunCount(current.autoRunTotal) || autoRunConfigRef.current.defaultCount,
+              }
+            : current
+        )));
+
+        try {
+          const success = await sendSessionMessageRef.current?.(
+            latestSession,
+            autoRunConfigRef.current.prompt,
+            [],
+            { isAuto: true }
+          );
+
+          if (success === false) {
+            setSessions((prev) => prev.map((current) => (
+              current.id === session.id
+                ? {
+                    ...current,
+                    autoRunEnabled: false,
+                    autoRunRemaining: 0,
+                  }
+                : current
+            )));
+          }
+        } finally {
+          runningSessionIdsRef.current.delete(session.id);
+          scheduleAutoRunSessionsRef.current();
+        }
+      }, AUTO_RUN_IDLE_MS);
+
+      autoRunTimeoutsRef.current.set(session.id, timeoutId);
+    });
+  }, [clearAutoRunTimer, shouldAutoRunSession]);
+
+  useEffect(() => {
+    scheduleAutoRunSessionsRef.current = scheduleAutoRunSessions;
+  }, [scheduleAutoRunSessions]);
+
+  useEffect(() => {
+    scheduleAutoRunSessions(sessions);
+  }, [scheduleAutoRunSessions, sessions]);
 
   return (
     <I18nProvider value={i18n}>
@@ -826,7 +992,7 @@ export default function App() {
                     }`}
                     title={activeSession.syncWithCli
                       ? tx('Auto-run is paused while external CLI sync is active', '外部 CLI 同步期间，自动续跑已暂停')
-                      : tx('Auto-run the next step every 5 seconds while idle, up to {count} times', '空闲 5 秒后自动执行下一步，最多 {count} 次', { count: activeAutoRunTotal })}
+                      : tx('Auto-run the next step every 3 seconds while idle, up to {count} times', '空闲 3 秒后自动执行下一步，最多 {count} 次', { count: activeAutoRunTotal })}
                   >
                     <RotateCw size={11} className={activeSession.autoRunEnabled ? 'animate-spin' : ''} />
                     {activeSession.autoRunEnabled
@@ -880,16 +1046,12 @@ export default function App() {
               onOpenSettings={() => setShowSettings(true)}
               onOpenHistory={() => setShowHistory(true)}
               onSelectDirectory={handleSelectDirectory}
-              currentModel={activeSession?.provider === 'claude' ? (settings.model || '') : (settings.codexModel || '')}
-              onModelChange={(model) => updateSettings(
-                activeSession?.provider === 'claude'
-                  ? { model }
-                  : { codexModel: model }
-              )}
-              currentReasoningEffort={settings.codexReasoningEffort || ''}
-              onReasoningEffortChange={(codexReasoningEffort) => updateSettings({ codexReasoningEffort })}
-              permissionMode={settings.permissionMode || 'default'}
-              onPermissionModeChange={(permissionMode) => updateSettings({ permissionMode })}
+              currentModel={getSessionModel(activeSession)}
+              onModelChange={(model) => updateActiveSessionConfig({ model })}
+              currentReasoningEffort={getSessionReasoningEffort(activeSession)}
+              onReasoningEffortChange={(reasoningEffort) => updateActiveSessionConfig({ reasoningEffort })}
+              permissionMode={getSessionPermissionMode(activeSession)}
+              onPermissionModeChange={(permissionMode) => updateActiveSessionConfig({ permissionMode })}
               isStreaming={isStreaming}
               disabled={!activeSession || (isActiveSessionLoading && shouldHydrateActiveSession)}
               contextUsage={contextUsage}
@@ -1105,6 +1267,16 @@ function getInstallGuide(provider) {
     npm: 'npm install -g @anthropic-ai/claude-code',
     mirror: 'npm install -g @anthropic-ai/claude-code --registry=https://registry.npmmirror.com',
   };
+}
+
+function normalizePermissionModeForProvider(provider, permissionMode) {
+  const normalizedProvider = provider === 'codex' ? 'codex' : 'claude';
+  const normalizedMode = typeof permissionMode === 'string' ? permissionMode : 'default';
+  const allowedModes = normalizedProvider === 'codex'
+    ? ['default', 'plan', 'yolo']
+    : ['default', 'plan', 'acceptEdits', 'yolo'];
+
+  return allowedModes.includes(normalizedMode) ? normalizedMode : 'default';
 }
 
 function getConfiguredAutoRunCount(value) {

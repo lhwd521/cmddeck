@@ -210,8 +210,8 @@ export default function SettingsPanel({ settings, onUpdate, onClose }) {
               />
               <p className="text-xs leading-relaxed text-gray-500 dark:text-gray-400">
                 {tx(
-                  'Used when you turn on Auto for a chat. Idle delay is fixed at 5 seconds.',
-                  '用于开启聊天自动续跑时的默认次数。空闲延迟固定为 5 秒。'
+                  'Used when you turn on Auto for a chat. Idle delay is fixed at 3 seconds.',
+                  '用于开启聊天自动续跑时的默认次数。空闲延迟固定为 3 秒。'
                 )}
               </p>
             </div>

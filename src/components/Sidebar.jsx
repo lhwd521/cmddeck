@@ -148,6 +148,12 @@ export default function Sidebar({
                   <span className="text-sm truncate flex-1">
                     {localizeSessionTitle(session.title, tx)}
                   </span>
+                  {session.autoRunEnabled && (
+                    <span
+                      className="w-1.5 h-1.5 rounded-full bg-emerald-500 shadow-[0_0_0_2px_rgba(16,185,129,0.12)] animate-pulse shrink-0"
+                      title={tx('Auto-run active', '自动续跑中')}
+                    />
+                  )}
                   {session.hasUnread && !isActive && (
                     <span
                       className="w-2 h-2 rounded-full bg-red-500 shadow-[0_0_0_2px_rgba(239,68,68,0.15)] shrink-0"
