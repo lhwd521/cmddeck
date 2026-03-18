@@ -1,24 +1,35 @@
 # CmdDeck
 
-CmdDeck is a local-first desktop UI for Claude Code and Codex CLI.
+![CmdDeck screenshot](./ScreenShot_2026-03-18_141031_636.png)
 
-It keeps the CLI workflow, while adding a desktop chat interface, session history, CLI resume/open controls, file attachments, theme settings, and lightweight automation helpers.
+CmdDeck is a desktop UI for Claude Code and Codex CLI.
 
-## Notes
+It keeps the CLI workflow, but adds:
 
-- CmdDeck is not an official Anthropic or OpenAI product.
-- Claude Code and Codex CLI must be installed separately by the user.
-- Session data and settings are primarily stored locally on your machine.
+- chat-style sessions
+- local session history
+- resume/open in external CLI
+- file attachments
+- theme and per-chat model/mode settings
+- simple auto-run helpers
 
-## Releases
+## Status
 
-- Main release format: `CmdDeck Portable.exe`
-- Recommended GitHub asset: a `.zip` that contains the portable `.exe`
+- Current releases are for Windows only.
+- The project is developed and tested on Windows.
+- macOS and Linux are not tested yet.
+- Claude Code and Codex CLI are not bundled. Users install them separately.
+- Session data and settings stay on the local machine.
+
+## Download
+
+- Recommended GitHub asset: `CmdDeck-*-portable.zip`
+- Unzip it and run the included `.exe`
 - Users still need to install Claude Code or Codex CLI separately
 
-## Build
+## Development
 
-- `npm run dev`: start the app in development
-- `npm run build`: build the portable Windows app
-- `npm run build:portable:zip`: build the portable app and zip the generated `.exe` for GitHub Releases
-- `npm run build:installer`: optional NSIS installer build
+- `npm run dev`
+- `npm run build`
+- `npm run build:portable:zip`
+- `npm run build:installer`
