@@ -16,6 +16,7 @@ import SlashCommandMenu from './SlashCommandMenu';
 import { useI18n } from '../i18n';
 
 const IMAGE_EXTS = ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.svg'];
+const WORKSPACE_TRANSFER_TYPE = 'application/x-cmddeck-workspace-paths';
 
 function isImageFile(filePath) {
   const ext = filePath.toLowerCase().split('.').pop();
@@ -748,10 +749,16 @@ export default function InputArea({ onSend, onAbort, onClear, onDeleteSession, o
 }
 
 function hasDroppedFiles(dataTransfer) {
-  return Array.from(dataTransfer?.types || []).includes('Files');
+  const types = Array.from(dataTransfer?.types || []);
+  return types.includes('Files') || types.includes(WORKSPACE_TRANSFER_TYPE);
 }
 
 function collectDroppedEntries(dataTransfer) {
+  const workspaceEntries = parseWorkspaceEntries(dataTransfer);
+  if (workspaceEntries.length > 0) {
+    return workspaceEntries;
+  }
+
   const entries = [];
   const seenPaths = new Set();
   const items = Array.from(dataTransfer?.items || []);
@@ -798,6 +805,37 @@ function collectDroppedEntries(dataTransfer) {
   }
 
   return entries;
+}
+
+function parseWorkspaceEntries(dataTransfer) {
+  try {
+    const raw = dataTransfer?.getData?.(WORKSPACE_TRANSFER_TYPE);
+    if (!raw) {
+      return [];
+    }
+
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    const seenPaths = new Set();
+    return parsed
+      .map((entry) => ({
+        path: typeof entry?.path === 'string' ? entry.path : '',
+        isDirectory: entry?.isDirectory === true,
+      }))
+      .filter((entry) => {
+        if (!entry.path || seenPaths.has(entry.path)) {
+          return false;
+        }
+
+        seenPaths.add(entry.path);
+        return true;
+      });
+  } catch {
+    return [];
+  }
 }
 
 function getEffortLabel(provider, reasoningEffort, tx) {

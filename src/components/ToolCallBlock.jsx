@@ -60,25 +60,32 @@ export default function ToolCallBlock({ tool }) {
 
   const getToolSummary = () => {
     if (!tool.input) return tool.name;
+    if (Array.isArray(tool.input.changes) && tool.input.changes.length > 0) {
+      const firstChange = tool.input.changes[0];
+      if (tool.input.changes.length === 1) {
+        return `${tool.name}: ${firstChange.path || ''}`;
+      }
+      return `${tool.name}: ${tool.input.changes.length} files`;
+    }
     switch (tool.name) {
       case 'Bash':
       case 'Command Execution':
         return `$ ${(tool.input.command || '').slice(0, 100)}`;
       case 'Read':
       case 'File Read':
-        return `${tx('Read', '读取')}: ${tool.input.file_path || ''}`;
+        return `${tx('Read', '读取')}: ${tool.input.file_path || tool.input.path || tool.input.command || ''}`;
       case 'Edit':
       case 'File Edit':
-        return `${tx('Edit', '编辑')}: ${tool.input.file_path || ''}`;
+        return `${tx('Edit', '编辑')}: ${tool.input.file_path || tool.input.path || tool.input.command || ''}`;
       case 'Write':
       case 'File Write':
-        return `${tx('Write', '写入')}: ${tool.input.file_path || ''}`;
+        return `${tx('Write', '写入')}: ${tool.input.file_path || tool.input.path || tool.input.command || ''}`;
       case 'Grep':
       case 'Search Files':
-        return `${tx('Search', '搜索')}: ${tool.input.pattern || ''}`;
+        return `${tx('Search', '搜索')}: ${tool.input.pattern || tool.input.command || ''}`;
       case 'Glob':
       case 'List Directory':
-        return `${tx('Find', '查找')}: ${tool.input.pattern || ''}`;
+        return `${tx('Find', '查找')}: ${tool.input.pattern || tool.input.path || tool.input.command || ''}`;
       case 'WebSearch':
       case 'Search Web':
         return `${tx('Search', '搜索')}: ${tool.input.query || ''}`;

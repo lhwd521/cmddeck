@@ -434,6 +434,77 @@ ipcMain.handle('paths:classify', (_event, paths = []) => {
   }
 });
 
+ipcMain.handle('workspace:listDirectory', (_event, targetPath) => {
+  try {
+    const normalizedPath = String(targetPath || '').trim();
+    if (!normalizedPath) {
+      return { success: false, error: 'Workspace path is required.', entries: [] };
+    }
+
+    const stats = fs.statSync(normalizedPath);
+    if (!stats.isDirectory()) {
+      return { success: false, error: 'Target path is not a directory.', entries: [] };
+    }
+
+    const entries = fs.readdirSync(normalizedPath, { withFileTypes: true })
+      .map((entry) => {
+        const entryPath = path.join(normalizedPath, entry.name);
+
+        try {
+          let isDirectory = entry.isDirectory();
+          if (!entry.isDirectory() && !entry.isFile()) {
+            isDirectory = fs.statSync(entryPath).isDirectory();
+          }
+
+          return {
+            name: entry.name,
+            path: entryPath,
+            isDirectory,
+          };
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean)
+      .sort((left, right) => {
+        if (left.isDirectory !== right.isDirectory) {
+          return left.isDirectory ? -1 : 1;
+        }
+
+        return left.name.localeCompare(right.name, undefined, {
+          numeric: true,
+          sensitivity: 'base',
+        });
+      });
+
+    return { success: true, entries };
+  } catch (err) {
+    return { success: false, error: err.message, entries: [] };
+  }
+});
+
+ipcMain.handle('workspace:openPath', async (_event, targetPath) => {
+  try {
+    const error = await shell.openPath(String(targetPath || ''));
+    if (error) {
+      return { success: false, error };
+    }
+
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('workspace:revealPath', (_event, targetPath) => {
+  try {
+    shell.showItemInFolder(String(targetPath || ''));
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
 ipcMain.handle('external:open', async (_event, target) => {
   try {
     await shell.openExternal(target);

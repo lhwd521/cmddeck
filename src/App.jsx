@@ -6,6 +6,7 @@ import ChatView from './components/ChatView';
 import InputArea from './components/InputArea';
 import SettingsPanel from './components/Settings';
 import HistoryPanel from './components/HistoryPanel';
+import WorkspacePanel from './components/WorkspacePanel';
 import { useAgent } from './hooks/useAgent';
 import { useTheme } from './hooks/useTheme';
 import { loadSessions, saveSessions, createSession, summarizeMessages } from './utils/store';
@@ -54,6 +55,8 @@ export default function App() {
   const [activeSessionId, setActiveSessionId] = useState(sessions[0]?.id);
   const [showSettings, setShowSettings] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
+  const [workspaceHighlightsBySession, setWorkspaceHighlightsBySession] = useState(() => ({}));
+  const [workspaceRefreshBySession, setWorkspaceRefreshBySession] = useState(() => ({}));
   const [providerAvailability, setProviderAvailability] = useState({
     claude: { checked: false, installed: true },
     codex: { checked: false, installed: true },
@@ -80,6 +83,13 @@ export default function App() {
   const autoRunPrompt = getConfiguredAutoRunPrompt(settings.autoRunPrompt);
   const activeAutoRunTotal = getStoredAutoRunCount(activeSession?.autoRunTotal) || defaultAutoRunCount;
   const activeAutoRunRemaining = getStoredAutoRunCount(activeSession?.autoRunRemaining);
+  const activeWorkspacePath = activeSession?.cwd || activeSession?.providerSessionCwd || settings.cwd || '';
+  const activeWorkspaceHighlights = buildWorkspaceHighlights(
+    workspaceHighlightsBySession[activeSession?.id] || {},
+    activeWorkspacePath,
+    activeSession?.id === activeSessionId ? streamingToolCalls : []
+  );
+  const activeWorkspaceRefreshToken = workspaceRefreshBySession[activeSession?.id] || 0;
 
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
@@ -151,6 +161,74 @@ export default function App() {
     settings.permissionMode,
   ]);
 
+  const rememberWorkspace = useCallback((path) => {
+    const normalizedPath = normalizeWorkspacePath(path);
+    if (!normalizedPath) {
+      return;
+    }
+
+    const nextWorkspaces = mergeWorkspacePaths(settings.workspaces, [normalizedPath]);
+    if (hasSameWorkspacePaths(nextWorkspaces, settings.workspaces)) {
+      return;
+    }
+
+    updateSettings({ workspaces: nextWorkspaces });
+  }, [settings.workspaces, updateSettings]);
+
+  const rememberWorkspaceHighlights = useCallback((sessionId, workspacePath, toolCalls = []) => {
+    if (!sessionId || !Array.isArray(toolCalls) || toolCalls.length === 0) {
+      return false;
+    }
+
+    const nextHighlights = buildWorkspaceHighlightMap(toolCalls, workspacePath);
+    if (Object.keys(nextHighlights).length === 0) {
+      return false;
+    }
+
+    setWorkspaceHighlightsBySession((prev) => {
+      const currentHighlights = prev[sessionId] || {};
+      const mergedHighlights = mergeWorkspaceHighlightMaps(currentHighlights, nextHighlights);
+
+      if (areSameWorkspaceHighlightMaps(currentHighlights, mergedHighlights)) {
+        return prev;
+      }
+
+      return {
+        ...prev,
+        [sessionId]: mergedHighlights,
+      };
+    });
+    return true;
+  }, []);
+
+  const clearWorkspaceHighlights = useCallback((sessionId = null) => {
+    if (!sessionId) {
+      setWorkspaceHighlightsBySession({});
+      return;
+    }
+
+    setWorkspaceHighlightsBySession((prev) => {
+      if (!prev[sessionId]) {
+        return prev;
+      }
+
+      const next = { ...prev };
+      delete next[sessionId];
+      return next;
+    });
+  }, []);
+
+  const bumpWorkspaceRefresh = useCallback((sessionId) => {
+    if (!sessionId) {
+      return;
+    }
+
+    setWorkspaceRefreshBySession((prev) => ({
+      ...prev,
+      [sessionId]: (prev[sessionId] || 0) + 1,
+    }));
+  }, []);
+
   const clearAutoRunTimer = useCallback((sessionId = null) => {
     if (!sessionId) {
       for (const timeoutId of autoRunTimeoutsRef.current.values()) {
@@ -171,10 +249,12 @@ export default function App() {
     clearAutoRunTimer();
   }, [clearAutoRunTimer]);
 
-  const syncSessionFromCli = useCallback(async (sessionToSync) => {
+  const syncSessionFromCli = useCallback(async (sessionToSync, options = {}) => {
     if (!sessionToSync?.providerSessionId) {
       return false;
     }
+
+    const captureHighlights = options.captureHighlights === true;
 
     try {
       const result = await window.agent?.loadSession(sessionToSync.provider, sessionToSync.providerSessionId);
@@ -183,6 +263,10 @@ export default function App() {
       }
 
       const syncedMessages = normalizeHistoryMessages(result.messages || []);
+      const currentSession = sessionsRef.current.find((session) => session.id === sessionToSync.id) || sessionToSync;
+      const newToolCalls = captureHighlights
+        ? extractNewAssistantToolCalls(currentSession.messages || [], syncedMessages)
+        : [];
       const latestTimestamp = getLatestMessageTimestamp(syncedMessages);
 
       let changed = false;
@@ -222,11 +306,22 @@ export default function App() {
         return nextSession;
       }));
 
+      if (newToolCalls.length > 0) {
+        const shouldRefreshWorkspace = rememberWorkspaceHighlights(
+          sessionToSync.id,
+          currentSession.cwd || currentSession.providerSessionCwd || settings.cwd || '',
+          newToolCalls
+        );
+        if (shouldRefreshWorkspace) {
+          bumpWorkspaceRefresh(sessionToSync.id);
+        }
+      }
+
       return changed;
     } catch {
       return false;
     }
-  }, [settings.cwd]);
+  }, [bumpWorkspaceRefresh, rememberWorkspaceHighlights, settings.cwd]);
 
   useEffect(() => {
     let cancelled = false;
@@ -295,7 +390,7 @@ export default function App() {
         return;
       }
 
-      await syncSessionFromCli(session);
+      await syncSessionFromCli(session, { captureHighlights: true });
 
       setSessions((prev) => prev.map((current) => (
         current.id === event.sessionId
@@ -333,7 +428,7 @@ export default function App() {
       if (cancelled || isStreaming) {
         return;
       }
-      await syncSessionFromCli(activeSession);
+      await syncSessionFromCli(activeSession, { captureHighlights: true });
     }
 
     syncActiveCliSession();
@@ -402,9 +497,33 @@ export default function App() {
 
   const handleNewSession = useCallback((provider = settings.provider || 'claude') => {
     const session = createConfiguredSession(settings.cwd, provider);
+    rememberWorkspace(session.cwd || settings.cwd || '');
     setSessions((prev) => [session, ...prev]);
     setActiveSessionId(session.id);
-  }, [createConfiguredSession, settings.cwd, settings.provider]);
+  }, [createConfiguredSession, rememberWorkspace, settings.cwd, settings.provider]);
+
+  const applyWorkspaceToChat = useCallback((path, options = {}) => {
+    const normalizedPath = normalizeWorkspacePath(path);
+    if (!normalizedPath) {
+      return;
+    }
+
+    rememberWorkspace(normalizedPath);
+
+    if (options.newSession || !activeSession) {
+      const session = createConfiguredSession(
+        normalizedPath,
+        options.provider || activeSession?.provider || settings.provider || 'claude'
+      );
+      setSessions((prev) => [session, ...prev]);
+      setActiveSessionId(session.id);
+      return;
+    }
+
+    updateSession(activeSession.id, {
+      cwd: normalizedPath,
+    });
+  }, [activeSession, createConfiguredSession, rememberWorkspace, settings.provider, updateSession]);
 
   useEffect(() => {
     const handler = (event) => {
@@ -449,6 +568,7 @@ export default function App() {
     clearAutoRunTimer(sessionId);
     runningSessionIdsRef.current.delete(sessionId);
     cleanupSession(sessionId);
+    clearWorkspaceHighlights(sessionId);
     setSessions((prev) => {
       const filtered = prev.filter((session) => session.id !== sessionId);
       if (filtered.length === 0) {
@@ -465,7 +585,7 @@ export default function App() {
       }
       return filtered;
     });
-  }, [activeSessionId, cleanupSession, clearAutoRunTimer, createConfiguredSession, settings.cwd, settings.provider]);
+  }, [activeSessionId, cleanupSession, clearAutoRunTimer, clearWorkspaceHighlights, createConfiguredSession, settings.cwd, settings.provider]);
 
   const sendSessionMessage = useCallback(async (targetSession, message, files = [], options = {}) => {
     if (!targetSession) {
@@ -613,9 +733,21 @@ export default function App() {
       });
 
       if (result?.error) {
+        if (result.toolCalls?.length > 0) {
+          const shouldRefreshWorkspace = rememberWorkspaceHighlights(
+            sessionId,
+            currentSession.cwd || currentSession.providerSessionCwd || settings.cwd || '',
+            result.toolCalls
+          );
+          if (shouldRefreshWorkspace) {
+            bumpWorkspaceRefresh(sessionId);
+          }
+        }
+
         const assistantMessage = {
           role: 'assistant',
           content: result.text || `Error: ${result.error}`,
+          toolCalls: result.toolCalls?.length > 0 ? result.toolCalls : undefined,
           autoGenerated: isAuto || undefined,
         };
 
@@ -633,6 +765,17 @@ export default function App() {
       }
 
       if (result && (String(result.text || '').trim() || result.toolCalls?.length > 0)) {
+        if (result.toolCalls?.length > 0) {
+          const shouldRefreshWorkspace = rememberWorkspaceHighlights(
+            sessionId,
+            currentSession.cwd || currentSession.providerSessionCwd || settings.cwd || '',
+            result.toolCalls
+          );
+          if (shouldRefreshWorkspace) {
+            bumpWorkspaceRefresh(sessionId);
+          }
+        }
+
         const assistantMessage = {
           role: 'assistant',
           content: result.text,
@@ -690,6 +833,8 @@ export default function App() {
     settings.theme,
     syncSessionFromCli,
     tx,
+    bumpWorkspaceRefresh,
+    rememberWorkspaceHighlights,
   ]);
 
   useEffect(() => {
@@ -718,6 +863,7 @@ export default function App() {
     clearAutoRunTimer(activeSession.id);
     runningSessionIdsRef.current.delete(activeSession.id);
     cleanupSession(activeSession.id);
+    clearWorkspaceHighlights(activeSession.id);
 
     if (activeSession.providerSessionId) {
       const replacement = createConfiguredSession(
@@ -753,6 +899,7 @@ export default function App() {
     cleanupSession,
     clearAutoRunTimer,
     createConfiguredSession,
+    clearWorkspaceHighlights,
     getSessionModel,
     getSessionPermissionMode,
     getSessionReasoningEffort,
@@ -761,14 +908,39 @@ export default function App() {
   ]);
 
   const handleSelectDirectory = useCallback(async () => {
-    if (!window.claude?.selectDirectory || !activeSession) {
+    if (!window.claude?.selectDirectory) {
       return;
     }
     const dir = await window.claude.selectDirectory();
     if (dir) {
-      updateSession(activeSession.id, { cwd: dir });
+      applyWorkspaceToChat(dir);
     }
-  }, [activeSession, updateSession]);
+  }, [applyWorkspaceToChat]);
+
+  const handleBrowseWorkspace = useCallback(async () => {
+    if (!window.claude?.selectDirectory) {
+      return;
+    }
+
+    const dir = await window.claude.selectDirectory();
+    if (dir) {
+      applyWorkspaceToChat(dir);
+    }
+  }, [applyWorkspaceToChat]);
+
+  const handleBrowseDefaultDirectory = useCallback(async () => {
+    if (!window.claude?.selectDirectory) {
+      return;
+    }
+
+    const dir = await window.claude.selectDirectory();
+    if (!dir) {
+      return;
+    }
+
+    rememberWorkspace(dir);
+    updateSettings({ cwd: dir });
+  }, [rememberWorkspace, updateSettings]);
 
   const handleContinueProviderSession = useCallback(async (historySession) => {
     const existingSession = sessions.find((session) => (
@@ -795,13 +967,15 @@ export default function App() {
     Object.assign(session, summarizeMessages(messages));
     session.cwd = historySession.project || settings.cwd;
 
+    rememberWorkspace(session.cwd);
+
     setSessions((prev) => [session, ...prev]);
     setActiveSessionId(session.id);
 
     if (window.agent?.setSessionId) {
       window.agent.setSessionId(historySession.provider, session.id, historySession.sessionId);
     }
-  }, [createConfiguredSession, handleSelectSession, sessions, settings.cwd]);
+  }, [createConfiguredSession, handleSelectSession, rememberWorkspace, sessions, settings.cwd]);
 
   const handleOpenInCli = useCallback(async () => {
     if (!activeSession || !window.agent?.openInCli) {
@@ -1099,6 +1273,15 @@ export default function App() {
               currentProvider={activeSession?.provider || settings.provider || 'claude'}
             />
           </div>
+
+          <WorkspacePanel
+            collapsed={Boolean(settings.workspacePanelCollapsed)}
+            onToggleCollapse={() => updateSettings({ workspacePanelCollapsed: !settings.workspacePanelCollapsed })}
+            workspacePath={activeWorkspacePath}
+            fileHighlights={activeWorkspaceHighlights}
+            refreshToken={activeWorkspaceRefreshToken}
+            onBrowseWorkspace={handleBrowseWorkspace}
+          />
         </div>
 
         {showSettings && (
@@ -1106,6 +1289,7 @@ export default function App() {
             settings={settings}
             onUpdate={updateSettings}
             onClose={() => setShowSettings(false)}
+            onBrowseDefaultDirectory={handleBrowseDefaultDirectory}
           />
         )}
 
@@ -1346,6 +1530,50 @@ function getStoredAutoRunCount(value) {
   return Math.max(0, Math.min(parsed, 99));
 }
 
+function normalizeWorkspacePath(path) {
+  if (typeof path !== 'string') {
+    return '';
+  }
+
+  return path.trim();
+}
+
+function mergeWorkspacePaths(existingPaths = [], additions = []) {
+  const next = [];
+  const seen = new Set();
+
+  [...(additions || []), ...(existingPaths || [])].forEach((path) => {
+    const normalizedPath = normalizeWorkspacePath(path);
+    if (!normalizedPath) {
+      return;
+    }
+
+    const key = normalizedPath.toLowerCase();
+    if (seen.has(key)) {
+      return;
+    }
+
+    seen.add(key);
+    next.push(normalizedPath);
+  });
+
+  return next.slice(0, 12);
+}
+
+function hasSameWorkspacePaths(left = [], right = []) {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 function getLastAssistantMessage(messages) {
   if (!Array.isArray(messages) || messages.length === 0) {
     return null;
@@ -1353,6 +1581,336 @@ function getLastAssistantMessage(messages) {
 
   const lastMessage = messages[messages.length - 1];
   return lastMessage?.role === 'assistant' ? lastMessage : null;
+}
+
+function buildWorkspaceHighlights(storedHighlights = {}, workspacePath = '', streamingToolCalls = []) {
+  const runtimeHighlights = mergeWorkspaceHighlightMaps({}, storedHighlights);
+  const streamingHighlights = buildWorkspaceHighlightMap(streamingToolCalls, workspacePath);
+  return mergeWorkspaceHighlightMaps(runtimeHighlights, streamingHighlights);
+}
+
+function buildWorkspaceHighlightMap(toolCalls = [], workspacePath = '') {
+  const highlights = {};
+
+  for (const toolCall of toolCalls || []) {
+    const markers = extractWorkspaceMarkersFromToolCall(toolCall);
+    for (const marker of markers) {
+      const resolvedPath = resolveWorkspaceMarkerPath(marker.path, workspacePath);
+      if (!resolvedPath || !marker.status) {
+        continue;
+      }
+
+      highlights[resolvedPath] = mergeWorkspaceHighlightStatus(highlights[resolvedPath], marker.status);
+    }
+  }
+
+  return highlights;
+}
+
+function mergeWorkspaceHighlightMaps(base = {}, incoming = {}) {
+  const merged = { ...(base || {}) };
+
+  for (const [targetPath, status] of Object.entries(incoming || {})) {
+    const normalizedPath = normalizeWorkspaceMarkerPath(targetPath);
+    if (!normalizedPath || !status) {
+      continue;
+    }
+
+    merged[normalizedPath] = mergeWorkspaceHighlightStatus(merged[normalizedPath], status);
+  }
+
+  return merged;
+}
+
+function mergeWorkspaceHighlightStatus(currentStatus, nextStatus) {
+  if (currentStatus === 'created' || nextStatus === 'created') {
+    return 'created';
+  }
+
+  if (nextStatus === 'modified') {
+    return 'modified';
+  }
+
+  return currentStatus || '';
+}
+
+function areSameWorkspaceHighlightMaps(left = {}, right = {}) {
+  const leftEntries = Object.entries(left || {});
+  const rightEntries = Object.entries(right || {});
+  if (leftEntries.length !== rightEntries.length) {
+    return false;
+  }
+
+  for (const [targetPath, status] of leftEntries) {
+    if (right[targetPath] !== status) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function resolveWorkspaceMarkerPath(targetPath, workspacePath = '') {
+  const normalizedPath = normalizeWorkspaceMarkerPath(targetPath);
+  if (!normalizedPath) {
+    return '';
+  }
+
+  if (isAbsoluteWorkspaceMarkerPath(normalizedPath)) {
+    return collapseWorkspaceMarkerPath(normalizedPath);
+  }
+
+  const normalizedWorkspacePath = normalizeWorkspaceMarkerPath(workspacePath);
+  if (!normalizedWorkspacePath) {
+    return collapseWorkspaceMarkerPath(normalizedPath);
+  }
+
+  return joinWorkspaceMarkerPath(normalizedWorkspacePath, normalizedPath);
+}
+
+function isAbsoluteWorkspaceMarkerPath(targetPath) {
+  return /^[a-zA-Z]:\\/.test(targetPath) || /^\\\\/.test(targetPath);
+}
+
+function joinWorkspaceMarkerPath(basePath, relativePath) {
+  const normalizedBase = normalizeWorkspaceMarkerPath(basePath).replace(/[\\]+$/, '');
+  const normalizedRelative = normalizeWorkspaceMarkerPath(relativePath).replace(/^(?:\.\\)+/, '');
+  return collapseWorkspaceMarkerPath(
+    normalizedBase
+      ? `${normalizedBase}\\${normalizedRelative}`
+      : normalizedRelative
+  );
+}
+
+function collapseWorkspaceMarkerPath(targetPath) {
+  const normalizedPath = normalizeWorkspaceMarkerPath(targetPath);
+  if (!normalizedPath) {
+    return '';
+  }
+
+  const isUncPath = normalizedPath.startsWith('\\\\');
+  const driveMatch = normalizedPath.match(/^[a-zA-Z]:\\/);
+  const prefix = isUncPath ? '\\\\' : (driveMatch ? normalizedPath.slice(0, 2) : '');
+  const remainder = isUncPath
+    ? normalizedPath.slice(2)
+    : (driveMatch ? normalizedPath.slice(2) : normalizedPath);
+  const stack = [];
+
+  for (const segment of remainder.split('\\').filter(Boolean)) {
+    if (segment === '.') {
+      continue;
+    }
+
+    if (segment === '..') {
+      if (stack.length > 0 && stack[stack.length - 1] !== '..') {
+        stack.pop();
+      } else if (!prefix) {
+        stack.push(segment);
+      }
+      continue;
+    }
+
+    stack.push(segment);
+  }
+
+  if (isUncPath) {
+    return `\\\\${stack.join('\\')}`;
+  }
+
+  if (driveMatch) {
+    return `${prefix}\\${stack.join('\\')}`;
+  }
+
+  return stack.join('\\');
+}
+
+function extractWorkspaceMarkersFromToolCall(toolCall) {
+  if (!toolCall || typeof toolCall !== 'object') {
+    return [];
+  }
+
+  const normalizedName = String(toolCall.name || '').toLowerCase();
+  const input = toolCall.input;
+
+  if (Array.isArray(input?.changes) && input.changes.length > 0) {
+    return extractWorkspaceMarkersFromChanges(input.changes);
+  }
+
+  if (normalizedName.includes('write')) {
+    return extractPathMarkersFromInput(input, 'created');
+  }
+
+  if (normalizedName.includes('edit')) {
+    const directMarkers = extractPathMarkersFromInput(input, 'modified');
+    if (directMarkers.length > 0) {
+      return directMarkers;
+    }
+
+    return extractPatchMarkers(input);
+  }
+
+  return [];
+}
+
+function extractWorkspaceMarkersFromChanges(changes) {
+  const markers = [];
+
+  for (const change of changes) {
+    const path = typeof change?.path === 'string' ? change.path.trim() : '';
+    const kind = String(change?.kind || '').toLowerCase();
+    if (!path) {
+      continue;
+    }
+
+    if (kind === 'add') {
+      markers.push({ path, status: 'created' });
+      continue;
+    }
+
+    if (kind === 'modify' || kind === 'update') {
+      markers.push({ path, status: 'modified' });
+    }
+  }
+
+  return dedupeWorkspaceMarkers(markers);
+}
+
+function extractPathMarkersFromInput(input, status) {
+  if (!input || typeof input !== 'object') {
+    return [];
+  }
+
+  const keys = ['file_path', 'path', 'target_path'];
+  const markers = [];
+
+  for (const key of keys) {
+    const value = input[key];
+    if (typeof value === 'string' && value.trim()) {
+      markers.push({
+        path: value.trim(),
+        status,
+      });
+    }
+  }
+
+  return dedupeWorkspaceMarkers(markers);
+}
+
+function extractPatchMarkers(input) {
+  const patchText = getPatchText(input);
+  if (!patchText) {
+    return [];
+  }
+
+  const markers = [];
+  const linePattern = /^\*\*\* (Add|Update) File:\s+(.+)$/gm;
+  let match = linePattern.exec(patchText);
+
+  while (match) {
+    markers.push({
+      path: String(match[2] || '').trim(),
+      status: match[1] === 'Add' ? 'created' : 'modified',
+    });
+    match = linePattern.exec(patchText);
+  }
+
+  return dedupeWorkspaceMarkers(markers);
+}
+
+function getPatchText(input) {
+  if (!input) {
+    return '';
+  }
+
+  if (typeof input === 'string') {
+    return input;
+  }
+
+  const candidates = [
+    input.patch,
+    input.input,
+    input.text,
+    input.replacement,
+  ];
+
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.includes('*** Begin Patch')) {
+      return candidate;
+    }
+  }
+
+  return '';
+}
+
+function dedupeWorkspaceMarkers(markers) {
+  const seen = new Set();
+  const deduped = [];
+
+  for (const marker of markers) {
+    const path = normalizeWorkspaceMarkerPath(marker?.path);
+    if (!path) {
+      continue;
+    }
+
+    const key = `${marker.status}:${path.toLowerCase()}`;
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    deduped.push({
+      path,
+      status: marker.status,
+    });
+  }
+
+  return deduped;
+}
+
+function normalizeWorkspaceMarkerPath(path) {
+  if (typeof path !== 'string') {
+    return '';
+  }
+
+  return path.trim().replace(/\//g, '\\');
+}
+
+function extractNewAssistantToolCalls(currentMessages = [], syncedMessages = []) {
+  if (!Array.isArray(currentMessages) || !Array.isArray(syncedMessages)) {
+    return [];
+  }
+
+  if (currentMessages.length === 0 || syncedMessages.length <= currentMessages.length) {
+    return [];
+  }
+
+  for (let index = 0; index < currentMessages.length; index += 1) {
+    if (!areConversationMessagesEqual(currentMessages[index], syncedMessages[index])) {
+      return [];
+    }
+  }
+
+  const nextToolCalls = [];
+  for (let index = currentMessages.length; index < syncedMessages.length; index += 1) {
+    const message = syncedMessages[index];
+    if (message?.role === 'assistant' && Array.isArray(message.toolCalls)) {
+      nextToolCalls.push(...message.toolCalls);
+    }
+  }
+
+  return nextToolCalls;
+}
+
+function areConversationMessagesEqual(leftMessage, rightMessage) {
+  if (!leftMessage || !rightMessage) {
+    return false;
+  }
+
+  if (leftMessage.role !== rightMessage.role || leftMessage.content !== rightMessage.content) {
+    return false;
+  }
+
+  return JSON.stringify(leftMessage.toolCalls || []) === JSON.stringify(rightMessage.toolCalls || []);
 }
 
 function parseCodexFastCommand(message) {

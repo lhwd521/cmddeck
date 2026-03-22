@@ -5,7 +5,6 @@ const EventEmitter = require('events');
 
 const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.svg']);
 const TOOL_NAME_MAP = {
-  command_execution: 'Bash',
   shell_command: 'Bash',
   file_read: 'Read',
   read_file: 'Read',
@@ -22,6 +21,12 @@ const TOOL_NAME_MAP = {
   search_files: 'Grep',
   glob_search: 'Glob',
   list_directory: 'Glob',
+  file_change: 'File Change',
+  apply_patch: 'Edit',
+  view_image: 'Read',
+  update_plan: 'Task Plan',
+  request_user_input: 'Prompt User',
+  'multi_tool_use.parallel': 'Multi Tool',
 };
 const NON_TOOL_ITEM_TYPES = new Set([
   'agent_message',
@@ -370,11 +375,62 @@ function applyPermissionMode(args, permissionMode) {
 }
 
 function normalizeToolCall(item, phase) {
+  if (item?.type === 'file_change') {
+    const changes = normalizeFileChanges(item.changes);
+    return {
+      id: item.id || `${item.type}-${Date.now()}`,
+      name: inferFileChangeToolName(changes),
+      input: changes.length > 0 ? { changes } : null,
+      status: getToolStatus(item, phase),
+      result: phase === 'item.started' ? null : formatFileChangeResult(changes),
+    };
+  }
+
+  if (item?.type === 'function_call') {
+    const name = normalizeToolName(item.name);
+    if (!name) {
+      return null;
+    }
+
+    return {
+      id: item.call_id || item.id || `${item.type}-${Date.now()}`,
+      name,
+      input: parseFunctionArguments(item.arguments),
+      status: phase === 'item.completed' ? 'completed' : 'running',
+      result: null,
+    };
+  }
+
+  if (item?.type === 'function_call_output') {
+    return {
+      id: item.call_id || item.id || `${item.type}-${Date.now()}`,
+      status: inferToolStatusFromOutput(item.output),
+      result: decodeStructuredValue(item.output),
+    };
+  }
+
+  if (item?.type === 'custom_tool_call') {
+    const name = normalizeToolName(item.name);
+    if (!name) {
+      return null;
+    }
+
+    return {
+      id: item.call_id || item.id || `${item.type}-${Date.now()}`,
+      name,
+      input: decodeStructuredValue(item.input),
+      status: getCustomToolStatus(item, phase),
+      result: item.output ? decodeStructuredValue(item.output) : null,
+    };
+  }
+
   if (!isToolLikeItem(item)) {
     return null;
   }
 
-  const name = normalizeToolName(item.type);
+  const name = item.type === 'command_execution'
+    ? inferCommandExecutionToolName(item.command)
+    : normalizeToolName(item.type);
   if (!name) {
     return null;
   }
@@ -406,6 +462,10 @@ function extractToolInput(item) {
   switch (item.type) {
     case 'command_execution':
       return { command: item.command || '' };
+    case 'file_change':
+      return {
+        changes: normalizeFileChanges(item.changes),
+      };
     case 'web_search':
       return { query: item.query || item.input || '' };
     case 'web_fetch':
@@ -481,6 +541,59 @@ function extractToolResult(item) {
   return Object.keys(result).length > 0 ? result : null;
 }
 
+function parseFunctionArguments(rawArguments) {
+  if (!rawArguments || typeof rawArguments !== 'string') {
+    return null;
+  }
+
+  try {
+    return decodeStructuredValue(JSON.parse(rawArguments));
+  } catch {
+    return rawArguments;
+  }
+}
+
+function decodeStructuredValue(value) {
+  if (typeof value === 'string') {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map(decodeStructuredValue);
+  }
+
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entryValue]) => [key, decodeStructuredValue(entryValue)])
+    );
+  }
+
+  return value;
+}
+
+function inferToolStatusFromOutput(output) {
+  if (typeof output === 'string') {
+    const exitCodeMatch = output.match(/Exit code:\s*(\d+)/i);
+    if (exitCodeMatch) {
+      return exitCodeMatch[1] === '0' ? 'completed' : 'error';
+    }
+  }
+
+  return 'completed';
+}
+
+function getCustomToolStatus(item, phase) {
+  if (item.status === 'failed') {
+    return 'error';
+  }
+
+  if (phase === 'item.completed' || item.status === 'completed' || item.output !== undefined) {
+    return 'completed';
+  }
+
+  return 'running';
+}
+
 function isToolLikeItem(item) {
   if (!item?.type || NON_TOOL_ITEM_TYPES.has(item.type)) {
     return false;
@@ -529,7 +642,80 @@ function getProgressMessage(toolCall) {
   if (toolCall.name === 'Bash') {
     return 'Running shell command...';
   }
+  if (toolCall.name === 'Read') {
+    return 'Reading files...';
+  }
+  if (toolCall.name === 'Grep') {
+    return 'Searching files...';
+  }
+  if (toolCall.name === 'Glob') {
+    return 'Listing files...';
+  }
   return `Running ${toolCall.name}...`;
+}
+
+function inferCommandExecutionToolName(command) {
+  const normalized = String(command || '').toLowerCase();
+
+  if (
+    normalized.includes('get-content')
+    || normalized.match(/(^|[\s"'`])(cat|type|more|less|head|tail)([\s"'`]|$)/)
+  ) {
+    return 'Read';
+  }
+
+  if (
+    normalized.includes('get-childitem')
+    || normalized.match(/(^|[\s"'`])(ls|dir)([\s"'`]|$)/)
+  ) {
+    return 'Glob';
+  }
+
+  if (
+    normalized.match(/(^|[\s"'`])(rg|grep|findstr|select-string)([\s"'`]|$)/)
+  ) {
+    return 'Grep';
+  }
+
+  return 'Bash';
+}
+
+function normalizeFileChanges(changes) {
+  if (!Array.isArray(changes)) {
+    return [];
+  }
+
+  return changes
+    .map((change) => ({
+      path: typeof change?.path === 'string' ? change.path : '',
+      kind: typeof change?.kind === 'string' ? change.kind : '',
+    }))
+    .filter((change) => change.path);
+}
+
+function inferFileChangeToolName(changes) {
+  if (!Array.isArray(changes) || changes.length === 0) {
+    return 'File Change';
+  }
+
+  const kinds = new Set(changes.map((change) => change.kind));
+  if (kinds.size === 1 && kinds.has('add')) {
+    return 'Write';
+  }
+  if (kinds.size === 1 && (kinds.has('modify') || kinds.has('update'))) {
+    return 'Edit';
+  }
+  return 'File Change';
+}
+
+function formatFileChangeResult(changes) {
+  if (!Array.isArray(changes) || changes.length === 0) {
+    return null;
+  }
+
+  return changes
+    .map((change) => `${change.kind || 'change'}: ${change.path}`)
+    .join('\n');
 }
 
 function capitalize(value) {

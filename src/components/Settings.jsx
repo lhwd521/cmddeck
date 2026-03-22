@@ -13,7 +13,7 @@ import {
 } from 'lucide-react';
 import { useI18n } from '../i18n';
 
-export default function SettingsPanel({ settings, onUpdate, onClose }) {
+export default function SettingsPanel({ settings, onUpdate, onClose, onBrowseDefaultDirectory }) {
   const { tx } = useI18n();
   const [versions, setVersions] = useState({ claude: null, codex: null });
   const [versionLoading, setVersionLoading] = useState(true);
@@ -182,6 +182,10 @@ export default function SettingsPanel({ settings, onUpdate, onClose }) {
               />
               <button
                 onClick={async () => {
+                  if (onBrowseDefaultDirectory) {
+                    await onBrowseDefaultDirectory();
+                    return;
+                  }
                   const dir = await window.claude?.selectDirectory?.();
                   if (dir) onUpdate({ cwd: dir });
                 }}

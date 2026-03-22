@@ -4,6 +4,8 @@ const DEFAULT_SETTINGS = {
   theme: 'dark',
   fontSize: 14,
   cwd: '',
+  workspaces: [],
+  workspacePanelCollapsed: false,
   model: '',
   codexModel: '',
   codexReasoningEffort: '',
@@ -52,14 +54,14 @@ export function saveSessions(sessions) {
 export function loadSettings() {
   try {
     const data = localStorage.getItem(SETTINGS_KEY);
-    return data ? { ...DEFAULT_SETTINGS, ...JSON.parse(data) } : { ...DEFAULT_SETTINGS };
+    return data ? normalizeSettings(JSON.parse(data)) : normalizeSettings();
   } catch {
-    return { ...DEFAULT_SETTINGS };
+    return normalizeSettings();
   }
 }
 
 export function saveSettings(settings) {
-  localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  localStorage.setItem(SETTINGS_KEY, JSON.stringify(normalizeSettings(settings)));
 }
 
 export function generateId() {
@@ -174,4 +176,42 @@ function normalizeToolCalls(toolCalls) {
     ...tool,
     status: tool.status === 'running' ? 'error' : (tool.status || 'completed'),
   }));
+}
+
+function normalizeSettings(settings) {
+  return {
+    ...DEFAULT_SETTINGS,
+    ...settings,
+    cwd: typeof settings?.cwd === 'string' ? settings.cwd : '',
+    workspaces: normalizeWorkspaceList(settings?.workspaces),
+    workspacePanelCollapsed: Boolean(settings?.workspacePanelCollapsed),
+  };
+}
+
+function normalizeWorkspaceList(workspaces) {
+  if (!Array.isArray(workspaces)) {
+    return [];
+  }
+
+  const next = [];
+  const seen = new Set();
+
+  workspaces.forEach((workspace) => {
+    const path = typeof workspace === 'string'
+      ? workspace.trim()
+      : (typeof workspace?.path === 'string' ? workspace.path.trim() : '');
+    if (!path) {
+      return;
+    }
+
+    const key = path.toLowerCase();
+    if (seen.has(key)) {
+      return;
+    }
+
+    seen.add(key);
+    next.push(path);
+  });
+
+  return next.slice(0, 12);
 }

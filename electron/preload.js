@@ -5,6 +5,9 @@ contextBridge.exposeInMainWorld('electron', {
   maximize: () => ipcRenderer.send('window:maximize'),
   close: () => ipcRenderer.send('window:close'),
   openExternal: (target) => ipcRenderer.invoke('external:open', target),
+  listDirectory: (targetPath) => ipcRenderer.invoke('workspace:listDirectory', targetPath),
+  openPath: (targetPath) => ipcRenderer.invoke('workspace:openPath', targetPath),
+  revealPath: (targetPath) => ipcRenderer.invoke('workspace:revealPath', targetPath),
 });
 
 contextBridge.exposeInMainWorld('agent', {
