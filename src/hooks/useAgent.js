@@ -16,6 +16,55 @@ function formatErrorText(message) {
   return /^error:/i.test(trimmed) ? trimmed : `Error: ${trimmed}`;
 }
 
+function hasPermissionBlock(stderrText = '', permissionDenials = []) {
+  if (Array.isArray(permissionDenials) && permissionDenials.length > 0) {
+    return true;
+  }
+
+  const normalized = String(stderrText || '').toLowerCase();
+  return (
+    normalized.includes('approval')
+    || normalized.includes('permission')
+    || normalized.includes('read-only sandbox')
+    || normalized.includes('sandbox')
+  ) && (
+    normalized.includes('rejected')
+    || normalized.includes('blocked')
+    || normalized.includes('denied')
+    || normalized.includes('not granted')
+    || normalized.includes('approval settings')
+  );
+}
+
+function appendPermissionNotice(text, provider, permissionDenials = [], stderrText = '') {
+  if (!hasPermissionBlock(stderrText, permissionDenials)) {
+    return text || '';
+  }
+
+  const currentText = String(text || '').trimEnd();
+  if (currentText.includes('CmdDeck cannot approve this request in the UI yet')) {
+    return currentText;
+  }
+
+  const providerLabel = provider === 'codex' ? 'Codex' : 'Claude Code';
+  const notice = `Permission required. ${providerLabel} asked for an action CmdDeck cannot approve in the UI yet. Switch to Auto/Accept Edits/YOLO, or use Resume in CLI to approve it there.`;
+  return currentText ? `${currentText}\n\n${notice}` : notice;
+}
+
+function markDeniedToolCalls(toolCalls, permissionDenials = []) {
+  if (!Array.isArray(permissionDenials) || permissionDenials.length === 0) {
+    return;
+  }
+
+  const deniedIds = new Set(permissionDenials.map((denial) => denial.toolUseId).filter(Boolean));
+  for (const toolCall of toolCalls) {
+    if (deniedIds.has(toolCall.id)) {
+      toolCall.status = 'error';
+      toolCall.result = toolCall.result || 'Permission required.';
+    }
+  }
+}
+
 function upsertToolCall(toolCalls, nextToolCall) {
   if (!nextToolCall) {
     return;
@@ -186,7 +235,12 @@ export function useAgent() {
           }
           break;
         case 'done': {
-          const finalText = event.text ?? data.text;
+          const finalText = appendPermissionNotice(
+            event.text ?? data.text,
+            event.provider,
+            event.permissionDenials,
+            data.stderrText
+          );
           data.text = finalText;
           if (event.providerSessionId) {
             data.providerSessionId = event.providerSessionId;
@@ -207,6 +261,7 @@ export function useAgent() {
               setContextUsage(data.usage);
             }
           }
+          markDeniedToolCalls(data.toolCalls, event.permissionDenials);
           for (const toolCall of data.toolCalls) {
             if (toolCall.status === 'running') {
               toolCall.status = 'completed';
@@ -238,8 +293,14 @@ export function useAgent() {
 
           if (!entry.turnDone) {
             if (exitCode !== null && exitCode !== 0 && !String(data.text || '').trim() && stderrText) {
+              const finalErrorText = appendPermissionNotice(
+                formatErrorText(stderrText),
+                event.provider,
+                [],
+                stderrText
+              );
               resolveEntry(entry, {
-                text: formatErrorText(stderrText),
+                text: finalErrorText,
                 toolCalls: [...data.toolCalls],
                 providerSessionId: data.providerSessionId,
                 error: stderrText,
@@ -249,13 +310,15 @@ export function useAgent() {
             }
 
             resolveEntry(entry, {
-              text: data.text || '',
+              text: appendPermissionNotice(data.text || '', event.provider, [], stderrText),
               toolCalls: [...data.toolCalls],
               providerSessionId: data.providerSessionId,
             });
           } else {
+            const finalText = appendPermissionNotice(data.text || '', event.provider, [], stderrText);
+            data.text = finalText;
             resolveEntry(entry, {
-              text: data.text || '',
+              text: finalText,
               toolCalls: [...data.toolCalls],
               providerSessionId: data.providerSessionId,
             });

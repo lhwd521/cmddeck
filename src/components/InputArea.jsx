@@ -64,7 +64,7 @@ function AttachmentChip({ file, onRemove }) {
   );
 }
 
-export default function InputArea({ onSend, onAbort, onClear, onDeleteSession, onNewSession, onToggleTheme, onOpenSettings, onOpenHistory, onSelectDirectory, currentModel, onModelChange, currentReasoningEffort = '', onReasoningEffortChange, permissionMode, onPermissionModeChange, isStreaming, disabled, contextUsage, turnTimer, currentProvider = 'claude' }) {
+export default function InputArea({ onSend, onAbort, onClear, onDeleteSession, onNewSession, onToggleTheme, onOpenSettings, onOpenHistory, onSelectDirectory, currentModel, onModelChange, currentReasoningEffort = '', onReasoningEffortChange, permissionMode, onPermissionModeChange, isStreaming, disabled, queuedCount = 0, contextUsage, turnTimer, currentProvider = 'claude' }) {
   const { tx } = useI18n();
   const [text, setText] = useState('');
   const [attachedFiles, setAttachedFiles] = useState([]);
@@ -164,7 +164,6 @@ export default function InputArea({ onSend, onAbort, onClear, onDeleteSession, o
   const handleSend = async () => {
     const trimmed = text.trim();
     if (!trimmed && attachedFiles.length === 0) return;
-    if (isStreaming) return; // Don't send while streaming
 
     const draftText = text;
     const draftFiles = attachedFiles;
@@ -567,7 +566,9 @@ export default function InputArea({ onSend, onAbort, onClear, onDeleteSession, o
         {/* Footer */}
         <div className="flex items-center justify-between px-4 py-2 border-t border-claude-border-light dark:border-claude-border-dark bg-claude-surface-light dark:bg-claude-surface-dark">
           <span className="text-[10px] text-gray-400">
-            {tx('Ctrl+Enter to send | Esc to collapse', 'Ctrl+Enter 发送 | Esc 收起')}
+            {queuedCount > 0
+              ? tx('{count} queued | Ctrl+Enter to send | Esc to collapse', '{count} 条排队中 | Ctrl+Enter 发送 | Esc 收起', { count: queuedCount })
+              : tx('Ctrl+Enter to send | Esc to collapse', 'Ctrl+Enter 发送 | Esc 收起')}
           </span>
           <div className="flex items-center gap-2">
             {isStreaming && (
@@ -580,9 +581,9 @@ export default function InputArea({ onSend, onAbort, onClear, onDeleteSession, o
             )}
             <button
               onClick={handleSend}
-              disabled={disabled || isStreaming || (!text.trim() && attachedFiles.length === 0)}
+              disabled={disabled || (!text.trim() && attachedFiles.length === 0)}
               className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
-                !isStreaming && (text.trim() || attachedFiles.length > 0)
+                text.trim() || attachedFiles.length > 0
                   ? 'bg-claude-orange hover:opacity-90 text-white'
                   : 'bg-gray-200 dark:bg-gray-700 text-gray-400 cursor-not-allowed'
               }`}
@@ -641,7 +642,7 @@ export default function InputArea({ onSend, onAbort, onClear, onDeleteSession, o
         )}
         <button
           onClick={handleAttachClick}
-          disabled={disabled || isStreaming}
+          disabled={disabled}
           className="shrink-0 h-[42px] w-[42px] inline-flex items-center justify-center rounded-xl text-gray-400 hover:text-claude-orange hover:bg-claude-orange/10 transition-colors disabled:opacity-50"
           title={tx('Attach files', '附加文件')}
         >
@@ -688,9 +689,9 @@ export default function InputArea({ onSend, onAbort, onClear, onDeleteSession, o
         {/* Send button */}
         <button
           onClick={handleSend}
-          disabled={disabled || isStreaming || (!text.trim() && attachedFiles.length === 0)}
+          disabled={disabled || (!text.trim() && attachedFiles.length === 0)}
           className={`shrink-0 h-[42px] w-[42px] inline-flex items-center justify-center rounded-xl transition-all ${
-            !isStreaming && (text.trim() || attachedFiles.length > 0)
+            text.trim() || attachedFiles.length > 0
               ? 'bg-claude-orange hover:bg-claude-orange-light text-white shadow-sm shadow-claude-orange/25'
               : 'bg-gray-200 dark:bg-gray-700 text-gray-400 cursor-not-allowed'
           }`}
@@ -717,6 +718,11 @@ export default function InputArea({ onSend, onAbort, onClear, onDeleteSession, o
             <span>{tx('Enter send | Shift+Enter newline | / commands', 'Enter 发送 | Shift+Enter 换行 | / 命令')}</span>
           )}
           {charCount > 0 && <span>{tx('{count} ch', '{count} 字', { count: charCount })}</span>}
+          {queuedCount > 0 && (
+            <span className="text-claude-orange">
+              {tx('{count} queued', '{count} 条排队中', { count: queuedCount })}
+            </span>
+          )}
         </div>
         {/* Right: mode & context */}
         <div className="flex items-center gap-2">
@@ -860,6 +866,9 @@ function getPermissionLabel(provider, permissionMode, tx) {
   if (permissionMode === 'yolo') return 'YOLO';
   if (permissionMode === 'plan') return tx('Plan', '规划');
   if (permissionMode === 'acceptEdits') return tx('AutoEdit', '自动编辑');
+  if (permissionMode === 'auto') return 'Auto';
+  if (permissionMode === 'dontAsk') return tx("Don't Ask", '免打扰');
+  if (permissionMode === 'bypassPermissions') return tx('Bypass', '绕过');
   return permissionMode;
 }
 
@@ -869,6 +878,9 @@ function getPermissionTone(provider, permissionMode) {
   }
   if (permissionMode === 'yolo') return 'text-red-500';
   if (permissionMode === 'plan') return 'text-blue-400';
+  if (permissionMode === 'auto') return 'text-teal-400';
   if (permissionMode === 'acceptEdits') return 'text-yellow-400';
+  if (permissionMode === 'dontAsk') return 'text-orange-400';
+  if (permissionMode === 'bypassPermissions') return 'text-red-400';
   return '';
 }

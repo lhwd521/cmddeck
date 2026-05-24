@@ -64,10 +64,13 @@ export default function App() {
   const [copiedInstallCommand, setCopiedInstallCommand] = useState(null);
   const [cliLaunchStatus, setCliLaunchStatus] = useState(null);
   const [isActiveSessionLoading, setIsActiveSessionLoading] = useState(false);
+  const [sendQueueCounts, setSendQueueCounts] = useState(() => ({}));
   const activeSessionIdRef = useRef(activeSessionId);
   const sessionsRef = useRef(sessions);
   const autoRunTimeoutsRef = useRef(new Map());
   const runningSessionIdsRef = useRef(new Set());
+  const sessionSendChainsRef = useRef(new Map());
+  const queueGenerationRef = useRef(new Map());
   const autoRunConfigRef = useRef({
     prompt: DEFAULT_AUTO_RUN_PROMPT,
     defaultCount: 5,
@@ -83,6 +86,7 @@ export default function App() {
   const autoRunPrompt = getConfiguredAutoRunPrompt(settings.autoRunPrompt);
   const activeAutoRunTotal = getStoredAutoRunCount(activeSession?.autoRunTotal) || defaultAutoRunCount;
   const activeAutoRunRemaining = getStoredAutoRunCount(activeSession?.autoRunRemaining);
+  const activeSendQueueCount = activeSession ? (sendQueueCounts[activeSession.id] || 0) : 0;
   const activeWorkspacePath = activeSession?.cwd || activeSession?.providerSessionCwd || settings.cwd || '';
   const activeWorkspaceHighlights = buildWorkspaceHighlights(
     workspaceHighlightsBySession[activeSession?.id] || {},
@@ -105,6 +109,28 @@ export default function App() {
       defaultCount: defaultAutoRunCount,
     };
   }, [autoRunPrompt, defaultAutoRunCount]);
+
+  const updateSendQueueCount = useCallback((sessionId, updater) => {
+    if (!sessionId) {
+      return;
+    }
+
+    setSendQueueCounts((prev) => {
+      const current = prev[sessionId] || 0;
+      const next = Math.max(0, updater(current));
+      if (next === current) {
+        return prev;
+      }
+
+      const updated = { ...prev };
+      if (next === 0) {
+        delete updated[sessionId];
+      } else {
+        updated[sessionId] = next;
+      }
+      return updated;
+    });
+  }, []);
 
   const getSessionModel = useCallback((session) => {
     if (!session) {
@@ -245,6 +271,25 @@ export default function App() {
       window.clearTimeout(timeoutId);
       autoRunTimeoutsRef.current.delete(sessionId);
     }
+  }, []);
+
+  const clearSessionSendQueue = useCallback((sessionId) => {
+    if (!sessionId) {
+      return;
+    }
+
+    queueGenerationRef.current.set(
+      sessionId,
+      (queueGenerationRef.current.get(sessionId) || 0) + 1
+    );
+    setSendQueueCounts((prev) => {
+      if (!prev[sessionId]) {
+        return prev;
+      }
+      const updated = { ...prev };
+      delete updated[sessionId];
+      return updated;
+    });
   }, []);
 
   useEffect(() => () => {
@@ -539,7 +584,7 @@ export default function App() {
         const provider = activeSession?.provider || settings.provider || 'claude';
         const modes = provider === 'codex'
           ? ['default', 'plan', 'yolo']
-          : ['default', 'plan', 'acceptEdits', 'yolo'];
+          : ['default', 'acceptEdits', 'auto', 'dontAsk', 'bypassPermissions', 'plan', 'yolo'];
         const current = getSessionPermissionMode(activeSession);
         const index = modes.indexOf(current);
         if (activeSession) {
@@ -565,6 +610,7 @@ export default function App() {
 
   const handleDeleteSession = useCallback((sessionId) => {
     clearAutoRunTimer(sessionId);
+    clearSessionSendQueue(sessionId);
     runningSessionIdsRef.current.delete(sessionId);
     cleanupSession(sessionId);
     clearWorkspaceHighlights(sessionId);
@@ -584,9 +630,9 @@ export default function App() {
       }
       return filtered;
     });
-  }, [activeSessionId, cleanupSession, clearAutoRunTimer, clearWorkspaceHighlights, createConfiguredSession, settings.cwd, settings.provider]);
+  }, [activeSessionId, cleanupSession, clearAutoRunTimer, clearSessionSendQueue, clearWorkspaceHighlights, createConfiguredSession, settings.cwd, settings.provider]);
 
-  const sendSessionMessage = useCallback(async (targetSession, message, files = [], options = {}) => {
+  const sendSessionMessageNow = useCallback(async (targetSession, message, files = [], options = {}) => {
     if (!targetSession) {
       return false;
     }
@@ -834,6 +880,46 @@ export default function App() {
     rememberWorkspaceHighlights,
   ]);
 
+  const sendSessionMessage = useCallback((targetSession, message, files = [], options = {}) => {
+    if (!targetSession) {
+      return Promise.resolve(false);
+    }
+
+    const sessionId = targetSession.id;
+    const previousChain = sessionSendChainsRef.current.get(sessionId);
+    const queued = Boolean(previousChain);
+    const generation = queueGenerationRef.current.get(sessionId) || 0;
+
+    if (queued) {
+      updateSendQueueCount(sessionId, (count) => count + 1);
+    }
+
+    const chain = (previousChain || Promise.resolve())
+      .catch(() => false)
+      .then(async () => {
+        if (queued) {
+          updateSendQueueCount(sessionId, (count) => count - 1);
+        }
+
+        if (queued && (queueGenerationRef.current.get(sessionId) || 0) !== generation) {
+          return false;
+        }
+
+        const latestSession = sessionsRef.current.find((session) => session.id === sessionId) || targetSession;
+        return sendSessionMessageNow(latestSession, message, files, options);
+      });
+
+    const trackedChain = chain.finally(() => {
+      if (sessionSendChainsRef.current.get(sessionId) === trackedChain) {
+        sessionSendChainsRef.current.delete(sessionId);
+      }
+    });
+
+    sessionSendChainsRef.current.set(sessionId, trackedChain);
+
+    return queued ? Promise.resolve(true) : chain;
+  }, [sendSessionMessageNow, updateSendQueueCount]);
+
   useEffect(() => {
     sendSessionMessageRef.current = sendSessionMessage;
   }, [sendSessionMessage]);
@@ -848,9 +934,10 @@ export default function App() {
 
   const handleAbort = useCallback(() => {
     if (activeSession) {
+      clearSessionSendQueue(activeSession.id);
       abort(activeSession.id, activeSession.provider);
     }
-  }, [abort, activeSession]);
+  }, [abort, activeSession, clearSessionSendQueue]);
 
   const handleClear = useCallback(() => {
     if (!activeSession) {
@@ -858,6 +945,7 @@ export default function App() {
     }
 
     clearAutoRunTimer(activeSession.id);
+    clearSessionSendQueue(activeSession.id);
     runningSessionIdsRef.current.delete(activeSession.id);
     cleanupSession(activeSession.id);
     clearWorkspaceHighlights(activeSession.id);
@@ -895,6 +983,7 @@ export default function App() {
     activeSession,
     cleanupSession,
     clearAutoRunTimer,
+    clearSessionSendQueue,
     createConfiguredSession,
     clearWorkspaceHighlights,
     getSessionModel,
@@ -1265,6 +1354,7 @@ export default function App() {
               onPermissionModeChange={(permissionMode) => updateActiveSessionConfig({ permissionMode })}
               isStreaming={isStreaming}
               disabled={!activeSession || (isActiveSessionLoading && shouldHydrateActiveSession)}
+              queuedCount={activeSendQueueCount}
               contextUsage={contextUsage}
               turnTimer={turnTimer}
               currentProvider={activeSession?.provider || settings.provider || 'claude'}
@@ -1495,7 +1585,7 @@ function normalizePermissionModeForProvider(provider, permissionMode) {
   const normalizedMode = typeof permissionMode === 'string' ? permissionMode : 'default';
   const allowedModes = normalizedProvider === 'codex'
     ? ['default', 'plan', 'yolo']
-    : ['default', 'plan', 'acceptEdits', 'yolo'];
+    : ['default', 'acceptEdits', 'auto', 'dontAsk', 'bypassPermissions', 'plan', 'yolo'];
 
   return allowedModes.includes(normalizedMode) ? normalizedMode : 'default';
 }

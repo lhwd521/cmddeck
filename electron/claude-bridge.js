@@ -200,6 +200,7 @@ class ClaudeBridge extends EventEmitter {
           type: 'done',
           text: event.result || '',
           usage: normalizeUsage(event.usage),
+          permissionDenials: normalizePermissionDenials(event.permission_denials),
           providerSessionId: event.session_id || this.sessionIds.get(sessionId) || null,
         });
         break;
@@ -312,6 +313,18 @@ function normalizeUsage(usage) {
     inputTokens: usage.input_tokens || 0,
     outputTokens: usage.output_tokens || 0,
   };
+}
+
+function normalizePermissionDenials(denials) {
+  if (!Array.isArray(denials) || denials.length === 0) {
+    return [];
+  }
+
+  return denials.map((denial) => ({
+    toolName: denial?.tool_name || '',
+    toolUseId: denial?.tool_use_id || '',
+    toolInput: denial?.tool_input || null,
+  }));
 }
 
 module.exports = { ClaudeBridge };
